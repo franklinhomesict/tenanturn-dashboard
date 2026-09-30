@@ -8,7 +8,30 @@ const weakItem=(id,name,price,cost,extra={})=>({id,name,price,priceWithTax:price
 const doc=(id,type,status,j,amount,extra={})=>({id,type,status,createdAt:'2026-08-01T12:00:00Z',issueDate:'2026-08-01',closedAt:null,signedAt:null,priceWithTax:type.startsWith('customer')?amount:0,cost:type.startsWith('vendor')?amount:0,amountPaid:0,balance:amount,fullName:`${type} ${id}`,job:{id:j.id,number:j.number,name:j.name},account:type.startsWith('customer')?j.location.account:{id:`v-${id}`,name:'Vendor A',type:'vendor'},costItems:{nodes:[]},...extra});
 const run=(d,a='2026-08-01',b='2026-09-30')=>buildForensicModel(d,a,b);
 
+// Direct billing is allowed within the approved cost budget, but repeated draws
+// exceeding that budget or a different scope ID still require investigation.
+{ const d=empty(),j=job('direct','Direct Bill'); d.jobs=[j];
+ const scope=item('direct','Labor',1875,1500);
+ d.docs=[doc('direct-order','customerOrder','approved',j,1875,{closedAt:'2026-09-29T12:00:00Z',costItems:{nodes:[scope]}}),doc('direct-bill','vendorBill','approved',j,1500,{costItems:{nodes:[{...scope,price:0,priceWithTax:0}]}})];
+ let m=run(d); assert.ok(m.exceptions.some(e=>e.code==='DIRECT_BILL_WITHIN_APPROVED_BUDGET'));
+ assert.ok(!m.exceptions.some(e=>['COST_OVER_COMMITMENT','UNCOMMITTED_COST'].includes(e.code)));
+ d.docs.push(doc('extra-direct-bill','vendorBill','approved',j,100,{costItems:{nodes:[{...scope,cost:100,price:0,priceWithTax:0}]}}));
+ m=run(d);assert.ok(m.exceptions.some(e=>e.code==='COST_OVER_COMMITMENT'));
+ d.docs.pop();d.docs[1].costItems.nodes[0].jobCostItem={id:'unrelated-scope',name:'Labor'};
+ m=run(d);assert.ok(m.exceptions.some(e=>e.code==='UNCOMMITTED_COST'));
+}
+
 // 1. Denied financial documents remain audit history, never money.
+{ const d=empty(),account={id:'combined-vendor',name:'Ethan',type:'vendor'};
+ d.payments=[{id:'returned-combined',type:'debit',amount:698,amountApplied:0,amountUnapplied:698,paidAt:'2026-08-25T12:00:00Z',description:'218 E Kirby tree removal - payment returned by bank',account},{id:'replacement-combined',type:'debit',amount:2521,amountApplied:2521,amountUnapplied:0,paidAt:'2026-09-23T12:00:00Z',source:'Check #135',account}];
+ const paidBill=(id,name,cost)=>({id,type:'vendorBill',status:'approved',balance:0,account,job:{id,name}});
+ d.documentPayments=[{id:'combined-allocation-1',amount:698,payment:d.payments[1],document:paidBill('replacement-bill','218 E Kirby - Tree Removal',698)},{id:'combined-allocation-2',amount:1823,payment:d.payments[1],document:paidBill('other-bill','6421 S Sunnyside - Tree Work',1823)}];
+ let m=run(d);assert.ok(m.exceptions.some(e=>e.code==='RESOLVED_RETURNED_PAYMENT'));assert.equal(m.verifiedCashOut,2521);
+ d.documentPayments[0].document.job.name='999 Other Street - Tree Removal';
+ m=run(d);assert.ok(m.exceptions.some(e=>e.code==='RETURNED_PAYMENT'));
+ d.documentPayments[0].document.job.name='218 E Kirby - Tree Removal';d.documentPayments[1].amount=1800;
+ m=run(d);assert.ok(m.exceptions.some(e=>e.code==='RETURNED_PAYMENT'));
+}
 { const d=empty(),j=job('1','Denied Docs',{closedOn:'2026-08-10',actualCost:0});d.jobs=[j]; d.docs=[doc('i1','customerInvoice','denied',j,100),doc('b1','vendorBill','denied',j,50)]; const m=run(d);assert.equal(m.periodBilled,0);assert.equal(m.arDocs.length,0);assert.equal(m.apDocs.length,0);assert.equal(m.exceptions.filter(e=>e.code==='DENIED_FINANCIAL_EXCLUDED').length,2); }
 
 // 2. A denied proposal is a true loss only with final loss communication.
@@ -53,8 +76,9 @@ const run=(d,a='2026-08-01',b='2026-09-30')=>buildForensicModel(d,a,b);
 // 15. Negative approved change order reduces contract value and remains visible.
 { const d=empty(),j=job('15','Negative CO');d.jobs=[j];const base=item('b15','Labor',1000,600),credit=item('c15','Credit',-100,0);d.docs=[doc('o15','customerOrder','approved',j,1000,{costItems:{nodes:[base]}}),doc('co15','customerOrder','approved',j,-100,{fullName:'Make Ready Change Order 15-2',costItems:{nodes:[credit]}})];const m=run(d);assert.equal(m.jobs[0].contractedProduction,900);assert.ok(m.info.some(e=>e.code==='NEGATIVE_CHANGE_ORDER')); }
 
-// 16. Unapplied ordinary cash is surfaced for review.
-{ const d=empty();d.payments=[{id:'u16',type:'credit',amount:500,amountApplied:100,amountUnapplied:400,paidAt:'2026-09-01T12:00:00Z',source:'Meritrust deposit 1294',description:'Customer deposit',account:{id:'c16',name:'316 Rentals',type:'customer'}}];const m=run(d);assert.ok(m.review.some(e=>e.code==='UNAPPLIED_CASH')); }
+// 16. A balanced customer credit is a disclosed liability, not new sales.
+// An amount that does not balance remains an exception.
+{ const d=empty();d.payments=[{id:'u16',type:'credit',amount:500,amountApplied:100,amountUnapplied:400,paidAt:'2026-09-01T12:00:00Z',source:'Meritrust deposit 1294',description:'Customer deposit',account:{id:'c16',name:'316 Rentals',type:'customer'}}];let m=run(d);assert.ok(m.info.some(e=>e.code==='HELD_CUSTOMER_CREDIT'));assert.equal(m.heldCustomerCredits,400);assert.equal(m.salesWon,0);d.payments[0].amountUnapplied=401;m=run(d);assert.ok(m.review.some(e=>e.code==='UNAPPLIED_CASH')); }
 
 // 17. Closed job with later active evidence is Critical.
 { const d=empty(),j=job('17','Closed But Active',{closedOn:'2026-09-01T12:00:00Z'});d.jobs=[j];d.logs=[{id:'l17',date:'2026-09-03',notes:'Crew working today',job:{id:j.id}}];const m=run(d);assert.ok(m.critical.some(e=>e.code==='ACTIVE_AFTER_JOB_CLOSED')); }

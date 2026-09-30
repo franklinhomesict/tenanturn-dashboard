@@ -262,11 +262,18 @@ export default async function handler(req, res) {
 
     await approvalHistories(grantKey,documents.nodes.filter(d=>d.type==='customerOrder'&&d.status==='approved'));
 
-    const finalHeaders=await fetchPaged(grantKey,'documents',documentConnection);
+    const finalSources=await Promise.all([
+      fetchPaged(grantKey,'documents',documentConnection),fetchPaged(grantKey,'jobs',jobConnection),
+      fetchPaged(grantKey,'costItems',costItemConnection),fetchPaged(grantKey,'comments',commentConnection),
+      fetchPaged(grantKey,'dailyLogs',logConnection),fetchPaged(grantKey,'tasks',taskConnection),
+      fetchPaged(grantKey,'payments',paymentConnection),fetchPaged(grantKey,'documentPayments',documentPaymentConnection)
+    ]);
     const fingerprint=rows=>JSON.stringify(rows.slice().sort((a,b)=>a.id.localeCompare(b.id)));
-    if(fingerprint(documentHeaders.nodes)!==fingerprint(finalHeaders.nodes))throw new Error('JobTread documents changed during refresh; retry to get a consistent ledger.');
+    const originals=[documentHeaders,jobs,costItems,rawComments,dailyLogs,tasks,payments,documentPayments];
+    const sourceNames=['documents','jobs','cost items','comments','daily logs','tasks','payments','document payments'];
+    originals.forEach((s,i)=>{if(fingerprint(s.nodes)!==fingerprint(finalSources[i].nodes))throw new Error(`JobTread ${sourceNames[i]} changed during refresh; retry to get a consistent ledger.`);});
     const apiResponse = {
-      sourceCoverage:{complete:true,startedAt,checkedAt:new Date().toISOString(),documentsStable:true,counts:{jobs:jobs.count,documents:documentHeaders.count,costItems:costItems.count,comments:rawComments.count,dailyLogs:dailyLogs.count,tasks:tasks.count,payments:payments.count,documentPayments:documentPayments.count}},
+      sourceCoverage:{complete:true,startedAt,checkedAt:new Date().toISOString(),documentsStable:true,allCollectionsStable:true,counts:{jobs:jobs.count,documents:documentHeaders.count,costItems:costItems.count,comments:rawComments.count,dailyLogs:dailyLogs.count,tasks:tasks.count,payments:payments.count,documentPayments:documentPayments.count}},
       ok: true,
       fetchedAt: new Date().toISOString(),
       organizationId: org.id,

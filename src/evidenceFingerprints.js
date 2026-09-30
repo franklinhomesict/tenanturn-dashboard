@@ -1,5 +1,6 @@
 // Fingerprints detect changes to the source facts used in the September audit.
 export const evidenceFingerprints={
+  "22PcHe62JFHM": {"item":"64490b68","payment":"4439c0b5"},
   "22PeEMyttuK6": {
     "item": "242fa4c"
   },

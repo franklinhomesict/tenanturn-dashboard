@@ -5,18 +5,21 @@
 This section supersedes the older static-refresh instructions below.
 
 - Entry point: `src/AuditedDashboard.jsx`; shared calculations: `src/auditedLedger.js`.
-- Live feed: `api/dashboard.js`. Every connection is fully paginated, counted, and checked for duplicate IDs. Document headers are reread after loading to reject a changing ledger. Approved order histories must load.
+- Live feed: `api/dashboard.js`. Every connection is fully paginated, counted, and checked for duplicate IDs. All eight source collections are reread after loading to reject changes during refresh. Approved order histories must load.
 - Never edit a cached total or run the old build-time source patch scripts. `npm run build` runs regression checks and builds the actual checked-in source without rewriting it.
-- Sales includes every approved customer order, including additional approved proposals on the same job, by its actual approval timestamp in America/Chicago. Separately evidenced additional scope is included once. Invoice issue dates and progress balances never create a new sale.
+- Sales includes every approved customer order, including additional approved proposals on the same job, by its actual approval timestamp in America/Chicago. Separately evidenced additional scope is included once. Per the owner’s September 30 policy, net sales also include evidenced price increases, reductions and credits in their recognition period; full customer payment can establish acceptance of added scope. Invoice issue dates and progress balances never create a new sale.
 - `approvalEvidence.js` contains individual audited scope decisions with source references. `evidenceFingerprints.js` detects changes to those source facts. These are not monthly totals. Formalized scope is deduplicated against the original decision. Missing or changed evidence is flagged and excluded.
 - Future invoice-only added scopes with explicit dated approval notes are recognized automatically. Other new invoice-only scopes require review rather than guessed approval dates.
 - Draft and denied invoices and bills are excluded. Pending and approved financial documents are issued ledger activity. Billing uses invoice issue date, not approval/payment date.
 - Production excludes explicitly at-cost pass-through revenue and cost. Recorded job costs include fees. MR and CS share scope classifications; split results must conserve the company totals.
 - Whole-job completion requires actual completion/close evidence. Paying one vendor bill does not prove completion.
-- Open economics are provisional. Closed recorded job profit is distinct from the subset passing implemented checks. Neither is company net profit or safe owner draw.
+- Projections are labeled as estimates even when the underlying records reconcile. Open economics are provisional. Closed recorded job profit is distinct from the subset passing implemented checks. Neither is company net profit or safe owner draw.
 - Reviews retain their severity. Missing PM attribution, unresolved scope IDs, cost/commitment differences, and unclear stages cannot be relabeled housekeeping to obtain a green badge.
+- Receipt policy: materials charged to 316 or another owner/manager account are reference-only on TenanTurn invoices, with zero price/due and no TenanTurn cost. Attach the receipt for their owner-account matching. If an existing nonzero invoice charge was collected, retain and flag that real mismatch until its resolution is documented. Do not overwrite historical cash or assume a repayment.
+- `scopeReconciliation.js` validates original source fingerprints before matching progress/replacement invoice lines to original approved scopes. `priceAdjustmentEvidence.js` validates repricing and combined-scope decomposition. Original document values remain intact.
+- Balanced unapplied customer funds are explicitly shown as held customer credits, excluded from sales and profit. A missing allocation or inconsistent payment balance blocks financial figures.
 - No independent bank feed exists. Never label recorded JobTread cash as bank-confirmed cash.
-- Every successful refresh has a timestamp. Failed or incomplete refreshes retain the prior timestamp and show an error. Data older than five minutes is stale.
+- Every successful refresh has a timestamp. Failed or incomplete refreshes retain the prior timestamp and show an error. Data older than five minutes is stale. Financial figures are withheld on a failed refresh or stale source.
 - Run `npm run build`. Reconcile the actual source fixture outside the public repository, including sales table sum, pending/draft/denied treatment, and MR + CS invariants. Never commit customer records, grant keys, or the private audit fixture.
 - Verify a READY Vercel production deployment and the production API plus browser cards. A successful frontend build alone is not verification. Preview currently lacks the production JobTread credential and correctly reports a source error.
 

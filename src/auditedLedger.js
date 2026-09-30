@@ -2,11 +2,13 @@ import {buildForensicModel,normalize,inRange,eventBusinessDate,sum,ymd} from './
 import {approvalEvidence} from './approvalEvidence.js';
 import {evidenceFingerprints,digest} from './evidenceFingerprints.js';
 import {classifyBusinessLine,isPassThroughItem,isFeeItem} from './businessLineRules.js';
+import {reconcileAuditedScopes} from './scopeReconciliation.js';
+import {verifiedPriceAdjustments} from './priceAdjustmentEvidence.js';
 
 const cents=n=>Math.round(Number(n||0)*100);
 const total=(xs,f=x=>x)=>xs.reduce((n,x)=>n+cents(f(x)),0)/100;
 const valid=d=>['pending','approved'].includes(d.status);
-const key=i=>i.jobCostItem?.id||i.sourceCostItem?.id||i.id;
+const key=i=>i.auditScopeKey||i.jobCostItem?.id||i.sourceCostItem?.id||i.id;
 const classify=(i,context)=>i.auditBusinessLine||classifyBusinessLine(i,context);
 export const production=(d,line='Overall',kind='revenue')=>total(d.costItems?.nodes||[],i=>
  isPassThroughItem(i)||(kind==='revenue'&&isFeeItem(i))||(line!=='Overall'&&classify(i,`${d.job?.name||''} ${d.fullName||''}`)!==line)?0:
@@ -14,17 +16,27 @@ export const production=(d,line='Overall',kind='revenue')=>total(d.costItems?.no
 const date=d=>d&&ymd(new Date(d));
 
 export function auditedLedger(api,start,end,line='Overall'){
- const data=normalize(api);
+ const source=normalize(api);
+ // Apply only when the relevant historical job is present in this source set.
+ const reconciliation=source.jobs.length?reconcileAuditedScopes(source):{data:source,issues:[],applied:[]};
+ const data=reconciliation.data;
+ const priceChanges=verifiedPriceAdjustments(data);
+ data.scopeAdjustments=priceChanges.adjustments;
+ data.scopeAllocations=priceChanges.allocations;
  const scopeLines=new Map();
  const ranked=data.docs.filter(d=>valid(d)&&(d.type!=='customerOrder'||d.status==='approved')).slice().sort((a,b)=>['customerOrder','customerInvoice','vendorOrder','vendorBill'].indexOf(a.type)-['customerOrder','customerInvoice','vendorOrder','vendorBill'].indexOf(b.type));
  for(const d of ranked)for(const i of d.costItems?.nodes||[]){const k=`${d.job?.id}|${key(i)}`,v=classifyBusinessLine(i,`${d.job?.name||''} ${d.fullName||''}`);if(v!=='REVIEW'&&!scopeLines.has(k))scopeLines.set(k,v);}
  data.docs=data.docs.map(d=>({...d,costItems:{nodes:(d.costItems?.nodes||[]).map(i=>({...i,auditBusinessLine:scopeLines.get(`${d.job?.id}|${key(i)}`)||classifyBusinessLine(i,`${d.job?.name||''} ${d.fullName||''}`)}))}}));
- const core=buildForensicModel(data,start,end),exceptions=[...core.exceptions];
+ const core=buildForensicModel(data,start,end),exceptions=[...core.exceptions,...reconciliation.issues,...reconciliation.applied,...priceChanges.issues];
  const flag=(job,code,detail,severity='Review')=>exceptions.push({job:job?.name||'Source',code,detail,severity});
  const docs=data.docs,byId=new Map(docs.map(d=>[d.id,d])),comments=new Map(data.comments.map(c=>[c.id,c]));
  if(!api?.ok||api.organizationId!=='22Pa5G229Dc7'||!api.sourceCoverage?.complete)flag(null,'SOURCE_NOT_VERIFIED','The complete live JobTread source has not passed the feed checks.','Critical');
  for(const [name,rows] of Object.entries({jobs:data.jobs,documents:docs,comments:data.comments,payments:data.payments,documentPayments:data.documentPayments})){
   if(new Set(rows.map(x=>x.id)).size!==rows.length)flag(null,'DUPLICATE_SOURCE_ID',`${name} contains duplicate record IDs.`,'Critical');
+ }
+ for(const p of data.payments){
+  const allocated=total(data.documentPayments.filter(dp=>dp.payment?.id===p.id),dp=>dp.amount);
+  if(Math.abs(cents(allocated)-cents(p.amountApplied))>2||Math.abs(cents(p.amount)-cents(p.amountApplied)-cents(p.amountUnapplied))>2)flag({name:p.account?.name},'PAYMENT_ALLOCATION_MISMATCH',`Payment ${p.id} does not reconcile between its total, applied allocations and unapplied balance.`,'Critical');
  }
  for(const d of docs.filter(d=>valid(d)&&!(d.type==='customerOrder'&&d.status==='pending'))){
   const items=d.costItems?.nodes||[],value=d.type.startsWith('customer')?d.priceWithTax:d.cost;
@@ -35,7 +47,9 @@ export function auditedLedger(api,start,end,line='Overall'){
  }
  const orders=docs.filter(d=>d.type==='customerOrder'&&d.status==='approved');
  const contractKeys=new Set(orders.flatMap(d=>(d.costItems?.nodes||[]).map(i=>`${d.job?.id}|${key(i)}`)));
+ for(const a of priceChanges.allocations)for(const c of a.components)contractKeys.add(`${a.jobId}|${c.key}`);
  const salesEntries=[];
+ for(const s of priceChanges.adjustments)salesEntries.push({...s,value:line==='Overall'||classify(s.item,s.job.name)===line?s.value:0});
  for(const d of orders){
   if(!d.closedAt)flag(d.job,'APPROVAL_DATE_MISSING',`${d.fullName} has no approval timestamp. Excluded from period sales.`,'Critical');
   else salesEntries.push({id:d.id,doc:d,job:d.job,date:eventBusinessDate(d),value:production(d,line),basis:'Approved customer order',kind:/change order/i.test(d.fullName)?'Change order':'Proposal'});
@@ -63,17 +77,20 @@ export function auditedLedger(api,start,end,line='Overall'){
   if((evidence.commentId&&(!comment||comment.job?.id!==d.job?.id))||(evidence.paymentId&&(!payment||payment.document?.id!==d.id))||(!evidence.commentId&&!evidence.paymentId&&!(/approved/i.test(`${item.name} ${item.description}`)&&/\d{1,2}\/\d{1,2}/.test(`${item.name} ${item.description}`)))){
    flag(d.job,'APPROVAL_EVIDENCE_MISSING',`${d.fullName}: audited approval evidence is no longer available.`,'Critical');continue;
   }
+  if(evidence.paymentId&&(payment.payment?.type!=='credit'||cents(payment.amount)<=0||Math.abs(cents(d.balance))>2||Math.abs(cents(d.amountPaid)-cents(d.priceWithTax))>2)){
+   flag(d.job,'PAYMENT_RATIFICATION_INCOMPLETE',`${d.fullName}: the additional scope is no longer supported by a fully paid customer invoice.`,'Critical');continue;
+  }
   supportedItems.add(item.id);
   if(contractKeys.has(`${d.job?.id}|${key(item)}`))continue; // formalized later: one scope, one sale
   const value=line==='Overall'||classify(item,`${d.job?.name||''} ${d.fullName||''}`)===line?evidence.amount:0;
   salesEntries.push({id:item.id,doc:d,item,job:d.job,date:evidence.date,value,basis:evidence.basis,kind:'Additional scope'});
-  if(evidence.paymentId)flag(d.job,'SALES_RATIFIED_BY_PAYMENT',`${item.name}: included on customer payment ratification; no separate dated customer approval record.`);
+  if(evidence.paymentId)flag(d.job,'SALES_RATIFIED_BY_PAYMENT',`${item.name}: customer acceptance is evidenced by full invoice payment. The sales date is the recorded ratification date, not an inferred formal order approval date.`,'Info');
  }
  const automaticScopeKeys=new Set();
  for(const d of docs.filter(d=>d.type==='customerInvoice'&&valid(d)))for(const item of d.costItems?.nodes||[]){
   if(supportedItems.has(item.id)||isPassThroughItem(item)||contractKeys.has(`${d.job?.id}|${key(item)}`))continue;
   const text=`${item.name||''} ${item.description||''}`;
-  if(!/change order|added scope|additional (?:work|scope)/i.test(text))continue;
+  if(!/change order|added scope|additional (?:work|scope)|\bcredit\b/i.test(text))continue;
   const match=text.match(/approved[^.\n]{0,100}?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/i);
   if(!match)continue;
   const year=match[3]?(match[3].length===2?'20'+match[3]:match[3]):String(d.createdAt||'').slice(0,4);
@@ -126,5 +143,5 @@ export function auditedLedger(api,start,end,line='Overall'){
  });
  const closed=jobRows.filter(j=>j.job.closedOn&&(j.approved!==0||j.billed!==0||j.cost!==0)),checked=closed.filter(j=>j.status==='Closed / checked');
  const critical=exceptions.filter(e=>e.severity==='Critical'),review=exceptions.filter(e=>e.severity==='Review');
- return {core,data,exceptions,trust:critical.length?'BLOCKED':review.length?'REVIEW':'CHECKED',critical:critical.length,review:review.length,salesEntries:periodSales,sales:total(periodSales,s=>s.value),formalCount:periodSales.filter(s=>s.kind!=='Additional scope').length,additionalCount:new Set(periodSales.filter(s=>s.kind==='Additional scope').map(s=>s.doc.id)).size,pms:[...pms.values()].map(p=>({...p,sales:p.sales/100})),jobs:jobRows,current,vendors,periodInvoices,billed:total(periodInvoices,d=>production(d,line)),ar:total(arDocs,d=>d.balance),ap:total(apDocs,d=>d.balance),arDocs,apDocs,projectedProfit:total(current,j=>j.projectedProfit),futureCost:total(current,j=>j.remainingBudget),closedProfit:total(closed,j=>j.profitRecorded),checkedProfit:total(checked,j=>j.profitRecorded),checkedJobs:checked.length,closedJobs:closed.length,customerPaymentsApplied:core.customerPaymentsApplied};
+ return {core,data,exceptions,trust:critical.length?'BLOCKED':review.length?'REVIEW':'RECONCILED',critical:critical.length,review:review.length,salesEntries:periodSales,sales:total(periodSales,s=>s.value),grossSales:total(periodSales.filter(s=>s.value>0),s=>s.value),salesAdjustments:total(periodSales.filter(s=>s.value<0),s=>s.value),formalCount:periodSales.filter(s=>s.doc.type==='customerOrder').length,additionalCount:new Set(periodSales.filter(s=>s.kind==='Additional scope').map(s=>s.doc.id)).size,pms:[...pms.values()].map(p=>({...p,sales:p.sales/100})),jobs:jobRows,current,vendors,periodInvoices,billed:total(periodInvoices,d=>production(d,line)),ar:total(arDocs,d=>d.balance),ap:total(apDocs,d=>d.balance),arDocs,apDocs,projectedProfit:total(current,j=>j.projectedProfit),futureCost:total(current,j=>j.remainingBudget),closedProfit:total(closed,j=>j.profitRecorded),checkedProfit:total(checked,j=>j.profitRecorded),checkedJobs:checked.length,closedJobs:closed.length,customerPaymentsApplied:core.customerPaymentsApplied};
 }
