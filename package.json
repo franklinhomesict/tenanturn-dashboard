@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test:forensic": "node scripts/forensic-self-test.mjs && node scripts/business-line-self-test.mjs && node scripts/operational-trust-self-test.mjs && node scripts/source-stage-self-test.mjs && node scripts/vendor-attribution-self-test.mjs && node scripts/manual-overrides-self-test.mjs",
-    "build": "node scripts/apply-production-rules.mjs && node scripts/apply-workflow-truth.mjs && node scripts/apply-scheduled-assignment-fix.mjs && node scripts/fix-runtime-reference.mjs && npm run test:forensic && vite build",
+    "test:forensic": "node scripts/forensic-self-test.mjs && node scripts/business-line-self-test.mjs && node scripts/operational-trust-self-test.mjs && node scripts/source-stage-self-test.mjs && node scripts/vendor-attribution-self-test.mjs && node scripts/manual-overrides-self-test.mjs && node scripts/audited-ledger-self-test.mjs",
+    "build": "npm run test:forensic && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

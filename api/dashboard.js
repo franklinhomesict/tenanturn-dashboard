@@ -1,4 +1,6 @@
+import {auditedLedger} from '../src/auditedLedger.js';
 import { buildForensicModel, normalize } from '../src/forensicModel.js';
+import { manualOperationalOverrides, manualOverrideComment } from '../src/manualOverrides.js';
 
 const ORG_ID = '22Pa5G229Dc7';
 const ORG_NAME = 'TenanTurn LLC';
@@ -20,26 +22,33 @@ async function fetchPaged(grantKey, field, buildConnection) {
   const nodes = [];
   let page = null;
   let pages = 0;
+  let expectedCount = null;
+  const seenPages=new Set();
   do {
     const root = await pave({
       $: { grantKey },
-      organization: { $: { id: ORG_ID }, [field]: buildConnection(page) }
+      organization: { $: { id: ORG_ID }, [field]: {...buildConnection(page),count:{}} }
     }, field);
     const result = root?.organization?.[field];
     if (!result) throw new Error(`${field}: JobTread did not return organization.${field}`);
-    nodes.push(...(result.nodes || []));
-    page = result.nextPage || null;
+    if(!Array.isArray(result.nodes)||typeof result.count!=='number')throw new Error(`${field}: incomplete connection response`);
+    if(expectedCount==null)expectedCount=result.count;
+    if(expectedCount!==result.count)throw new Error(`${field}: source changed during pagination; refresh again`);
+    nodes.push(...result.nodes);
+    page = result.nextPage ?? null;
+    if(page!=null){if(seenPages.has(page))throw new Error(`${field}: repeated pagination cursor`);seenPages.add(page);}
     pages += 1;
     if (pages > 100) throw new Error(`${field}: Pagination safety stop reached`);
-  } while (page);
-  return { nodes, nextPage: null };
+  } while (page!=null);
+  if(nodes.length!==expectedCount||new Set(nodes.map(n=>n.id)).size!==nodes.length)throw new Error(`${field}: record coverage mismatch`);
+  return { nodes, nextPage: null, count:expectedCount };
 }
 
 const jobConnection = page => ({
   $: { size: 100, ...(page ? { page } : {}), sortBy: [{ field: 'createdAt', order: 'desc' }] },
   nodes: {
     id: {}, number: {}, name: {}, description: {}, createdAt: {}, closedOn: {},
-    projectedCost: {}, actualCost: {},
+    projectedCost: {}, projectedPrice: {}, actualCost: {},
     taskSummary: { started: {}, completed: {}, unstarted: {}, startDate: {}, endDate: {} },
     location: { account: { id: {}, name: {}, type: {} }, contact: { name: {} } }
   },
@@ -152,6 +161,23 @@ function attachCostItems(documents, costItems) {
   };
 }
 
+async function approvalHistories(grantKey,documents){
+  for(let offset=0;offset<documents.length;offset+=4){
+    await Promise.all(documents.slice(offset,offset+4).map(async d=>{
+      let page=null;const events=[],seen=new Set();
+      do{
+        const result=await pave({$:{grantKey},document:{$:{id:d.id},events:{$:{size:100,...(page?{page}:{})},nodes:{createdAt:{},data:{}},nextPage:{}}}},'approval history');
+        const c=result.document?.events;
+        if(!c||!Array.isArray(c.nodes))throw new Error('Incomplete approval history');
+        events.push(...c.nodes.map(e=>({createdAt:e.createdAt,nextStatus:e.data?.next?.status,previousStatus:e.data?.previous?.status,nextPrice:e.data?.next?.price,previousPrice:e.data?.previous?.price})));
+        page=c.nextPage??null;
+        if(page){if(seen.has(page))throw new Error('Repeated approval history cursor');seen.add(page);}
+      }while(page);
+      d.approvalHistory={nodes:events,nextPage:null};
+    }));
+  }
+}
+
 function enrichOperationalEvidence(jobs, comments) {
   const jobById = Object.fromEntries((jobs.nodes || []).map(j => [j.id, j]));
   const raw = comments.nodes || [];
@@ -194,88 +220,25 @@ function enrichOperationalEvidence(jobs, comments) {
     });
   }
 
-  const ownerConfirmed = [
-    {
-      id: 'owner-start-2006-s-topeka',
-      createdAt: '2026-09-06T23:55:00.000Z',
-      isPinned: false,
-      name: 'Owner-confirmed operational fact',
-      message: 'Owner-confirmed 2026-09-06: crew started work and has not finished.',
-      jobId: '22PcBXfXvsTT'
-    },
-    {
-      id: 'owner-pm-1847-s-gold',
-      createdAt: '2026-09-06T23:55:00.000Z',
-      isPinned: true,
-      name: 'Owner-confirmed PM attribution',
-      message: 'PM Brad PMI\nOwner-confirmed by Ian 2026-09-06.',
-      jobId: '22PdjcNy9Umt'
-    }
-  ];
-
-  for (const fact of ownerConfirmed) {
-    const job = jobById[fact.jobId];
-    if (!job) continue;
-    nodes.push({
-      id: fact.id,
-      createdAt: fact.createdAt,
-      isPinned: fact.isPinned,
-      name: fact.name,
-      message: fact.message,
-      job: { id: job.id, number: job.number, name: job.name },
-      evidenceSource: 'owner-confirmed'
-    });
+  for (const override of manualOperationalOverrides) {
+    const job=jobById[override.jobId];
+    if (!job || job.closedOn) continue;
+    const newerRaw=(raw||[]).filter(c=>c.job?.id===override.jobId&&new Date(c.createdAt)>new Date(override.confirmedAt));
+    const superseded=newerRaw.some(c=>highConfidenceFieldUpdate.test(String(c.message||''))||/\b(?:job|project|all work|work) (?:is )?(?:complete|completed|finished)\b|\bready to bill\b/i.test(String(c.message||'')));
+    if (!superseded) nodes.push(manualOverrideComment(override,job));
   }
 
   return { nodes, nextPage: null };
 }
 
-function compactAudit(apiResponse, start, end) {
-  const m = buildForensicModel(normalize(apiResponse), start, end);
-  return {
-    trust: m.trust,
-    criticalCount: m.criticalCount,
-    reviewCount: m.reviewCount,
-    infoCount: m.infoCount,
-    exceptions: m.exceptions,
-    sales: {
-      won: m.salesWon,
-      wins: m.wins.map(j => ({ job: j.job.name, value: j.baseApproval?.priceWithTax || 0, pm: j.src.pm, source: j.src.workSource })),
-      losses: m.losses.map(j => j.job.name),
-      pending: m.pendingNew.map(j => ({ job: j.job.name, value: j.pendingNew?.priceWithTax || 0, pm: j.src.pm, source: j.src.workSource })),
-      winRate: m.winRate
-    },
-    ops: m.current.map(j => ({ job: j.job.name, stage: j.stage, customer: j.src.billingCustomer, source: j.src.workSource, pm: j.src.pm, unbilled: j.unbilledContracted, economicsStatus: j.economicsStatus })),
-    finance: {
-      periodBilled: m.periodBilled,
-      customerPaymentsApplied: m.customerPaymentsApplied,
-      cashOnWay: m.cashDirected,
-      verifiedCashIn: m.verifiedCashIn,
-      verifiedCashOut: m.verifiedCashOut,
-      ar: m.finance.ar,
-      ap: m.finance.ap,
-      reconciledGP: m.reconciledGP,
-      provisionalGP: m.provisionalGP
-    },
-    jobs: m.jobs.map(j => ({
-      job: j.job.name,
-      stage: j.stage,
-      economicsStatus: j.economicsStatus,
-      billedProduction: j.billedProduction,
-      actualProductionCost: j.actualProductionCost,
-      passCost: j.passCost,
-      billedPass: j.billedPass,
-      feeCost: j.feeCost,
-      customerRefundCost: j.customerRefundCost,
-      profit: j.profit,
-      margin: j.margin,
-      source: j.src.workSource,
-      pm: j.src.pm
-    }))
-  };
+function compactAudit(apiResponse,start,end){
+ const m=auditedLedger(apiResponse,start,end);
+ return {version:'2026.09.30',period:{start,end,timeZone:'America/Chicago'},trust:m.trust,criticalCount:m.critical,reviewCount:m.review,sales:{total:m.sales,formalOrderCount:m.formalCount,entries:m.salesEntries.map(s=>({id:s.id,job:s.job,date:s.date,value:s.value,basis:s.basis,kind:s.kind}))},finance:{issuedProduction:m.billed,receivable:m.ar,payable:m.ap,projectedOpenJobProfit:m.projectedProfit,closedRecordedJobProfit:m.closedProfit,checkedClosedJobProfit:m.checkedProfit,customerPaymentsApplied:m.customerPaymentsApplied,futureCostBudget:m.futureCost},jobs:m.jobs.map(j=>({job:j.job,stage:j.stage,status:j.status,approved:j.approved,billed:j.billed,cost:j.cost,recordedProfit:j.profitRecorded,projectedProfit:j.projectedProfit,reviews:j.reviews})),exceptions:m.exceptions};
 }
 
 export default async function handler(req, res) {
+  res.setHeader('Cache-Control','no-store');
+  const startedAt=new Date().toISOString();
   const grantKey = process.env.JOBTREAD_GRANT_KEY;
   if (!grantKey) return res.status(503).json({ ok: false, code: 'JOBTREAD_NOT_CONFIGURED', error: 'JOBTREAD_GRANT_KEY is not configured for this Vercel project.' });
 
@@ -297,7 +260,13 @@ export default async function handler(req, res) {
     const payments = await fetchPaged(grantKey, 'payments', paymentConnection);
     const documentPayments = await fetchPaged(grantKey, 'documentPayments', documentPaymentConnection);
 
+    await approvalHistories(grantKey,documents.nodes.filter(d=>d.type==='customerOrder'&&d.status==='approved'));
+
+    const finalHeaders=await fetchPaged(grantKey,'documents',documentConnection);
+    const fingerprint=rows=>JSON.stringify(rows.slice().sort((a,b)=>a.id.localeCompare(b.id)));
+    if(fingerprint(documentHeaders.nodes)!==fingerprint(finalHeaders.nodes))throw new Error('JobTread documents changed during refresh; retry to get a consistent ledger.');
     const apiResponse = {
+      sourceCoverage:{complete:true,startedAt,checkedAt:new Date().toISOString(),documentsStable:true,counts:{jobs:jobs.count,documents:documentHeaders.count,costItems:costItems.count,comments:rawComments.count,dailyLogs:dailyLogs.count,tasks:tasks.count,payments:payments.count,documentPayments:documentPayments.count}},
       ok: true,
       fetchedAt: new Date().toISOString(),
       organizationId: org.id,
@@ -306,8 +275,8 @@ export default async function handler(req, res) {
     };
 
     if (String(req.query?.audit || '') === '1') {
-      const start = String(req.query?.start || '2026-08-31');
-      const end = String(req.query?.end || '2026-09-06');
+      const start = String(req.query?.start || new Date().toISOString().slice(0,7)+'-01');
+      const end = String(req.query?.end || new Date().toISOString().slice(0,10));
       return res.status(200).json({ ok: true, fetchedAt: apiResponse.fetchedAt, organizationId: org.id, organizationName: org.name, audit: compactAudit(apiResponse, start, end) });
     }
 

@@ -20,6 +20,7 @@ const data={
     doc('Bill-B','vendorBill','approved',vendorB,100,[bVendor])
   ]
 };
+for(const d of data.docs.filter(d=>['customerInvoice','vendorBill'].includes(d.type))){ const amount=d.type==='customerInvoice'?d.priceWithTax:d.cost; d.amountPaid=amount;d.balance=0;data.documentPayments.push({id:'pay-'+d.id,amount,document:d,payment:{id:'p-'+d.id,type:d.type==='customerInvoice'?'credit':'debit',paidAt:'2026-09-04T12:00:00Z'}}); }
 const m=buildForensicModel(data,'2026-09-01','2026-09-30');
 const a=m.people.vendors.find(v=>v.name==='Vendor A');
 const b=m.people.vendors.find(v=>v.name==='Vendor B');

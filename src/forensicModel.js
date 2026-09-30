@@ -1,9 +1,10 @@
-const knownPMs = ['Ben', 'Jessica', 'Lexi', 'Melinda', 'Brandon', 'Brad', 'Ally'];
+import {isPassThroughItem} from './businessLineRules.js';
+const knownPMs = ['Ben', 'Jessica', 'Lexi', 'Melinda', 'Brandon', 'Brad', 'Ally', 'Randy'];
 const passRx = /\b(reimbursement|reimbursements|reimbursable|pass[- ]?through)\b/i;
 const feeRx = /payment processing fee|instant pay/i;
 const changeRx = /change order/i;
 const creditRx = /\b(credit|refund)\b/i;
-const lossRx = /went with another|chose (?:a )?cheaper|another contractor|not moving forward|decided not to|declined (?:the )?(?:bid|work)|lost (?:the )?(?:job|bid)|owner chose|customer chose/i;
+const lossRx = /went with another|went forward with another bid|selected another bid|selected a different bid|chose another bid|chose (?:a )?cheaper|another contractor|not moving forward|decided not to|declined (?:the )?(?:bid|work)|lost (?:the )?(?:job|bid)|owner chose|customer chose/i;
 const activeRx = /\b(work(?:ing)? today|work underway|in progress|installed|installing|demoing|(?:is|are|was|were) painting|crew (?:is|was|are|were) (?:there|on site|onsite)|(?:he|they|we) (?:is|are|was|were)?\s*(?:on site|onsite)|wrapping up|finishing|started work|starting work|materials delivered|delivered today)\b/i;
 const wholeDoneRx = /\b(?:job|project) (?:is )?(?:complete|completed|finished)\b|\b(?:work|all work) (?:is )?(?:complete|completed|finished)\b|\ball done\b|\bready to bill\b|\bjob finished\b|\bwrapped up the job\b|\bcomplete and has been paid\b/i;
 const prepayRx = /paid in advance|before work started|prepayment|paid up front|deposit invoice|mobilization deposit/i;
@@ -14,7 +15,7 @@ const structuredPmRx = /^\s*[-*•]?\s*(?:notes?\s*[:=-]?\s*)?(?:pm|property man
 const TOL = 0.02;
 const TZ = 'America/Chicago';
 
-export const money = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(Number(n || 0));
+export const money = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(n || 0));
 export const pct = n => `${Number.isFinite(n) ? n.toFixed(1) : '0.0'}%`;
 export const sum = (a, f = x => x) => (a || []).reduce((t, x) => t + (Number(f(x)) || 0), 0);
 export const ymd = d => {
@@ -39,13 +40,7 @@ const weakScopeKey = i => i?.name ? `NAME:${cleanName(i.name)}` : null;
 const lineRevenue = i => Number(i?.priceWithTax ?? i?.price ?? 0) || 0;
 const lineCost = i => Number(i?.cost ?? 0) || 0;
 
-const isPassItem = i => {
-  const name = String(i?.name || '');
-  if (passRx.test(name)) return true;
-  const desc = String(i?.description || '');
-  const generic = /^(materials?|receipts?|supplies?|paint|hardware)$/i.test(name.trim());
-  return generic && /at cost|no markup|pass[- ]?through|reimburs/i.test(desc) && Math.abs(lineRevenue(i) - lineCost(i)) <= TOL;
-};
+const isPassItem = isPassThroughItem;
 const isPassDoc = d => passRx.test(String(d?.fullName || ''));
 const isFeeDoc = d => String(d?.account?.name || '').trim() === '316 Payment Processing Fee' || feeRx.test(`${d?.account?.name || ''} ${d?.fullName || ''}`);
 const isChange = d => changeRx.test(d?.fullName || '');
@@ -129,11 +124,13 @@ function sourceIdentity(job, jobComments, commentsById) {
   if (/\bpmi\b/i.test(sourceProbe)) workSource = 'PMI';
   else if (/\bjn\b|jn investments/i.test(sourceProbe)) workSource = 'JN Investments';
   else if (/\bsb\b|sb investments/i.test(sourceProbe)) workSource = 'SB Investments';
-  else if (/blu\s*2|\bblu\b/i.test(sourceProbe)) workSource = 'Blu / Blu 2';
+  else if (/blu\s*2|\bblu2\b/i.test(sourceProbe)) workSource = 'Blu 2';
+  else if (/\bblu\b/i.test(sourceProbe)) workSource = 'Blu';
   else if (explicit316.test(sourceProbe)) workSource = '316 Rentals';
   if (workSource === 'Unknown') {
     if (/316/i.test(billingCustomer)) workSource = '316 Rentals';
-    else if (/^blu\s*2?$|\bblu\s*2?\b/i.test(billingCustomer)) workSource = 'Blu / Blu 2';
+    else if (/^blu\s*2$|^blu2$/i.test(billingCustomer.trim())) workSource = 'Blu 2';
+    else if (/^blu$/i.test(billingCustomer.trim())) workSource = 'Blu';
     else if (/sb investments/i.test(billingCustomer)) workSource = 'SB Investments';
     else if (/jn investments/i.test(billingCustomer)) workSource = 'JN Investments';
   }
@@ -148,10 +145,20 @@ function sourceIdentity(job, jobComments, commentsById) {
   if (pm === 'Unattributed' && /\bPM\s+Melinda\s+Haslam\b/i.test(job?.description || '')) pm = 'Melinda';
   if (pm === 'Unattributed' && /(?:\bJessica,\s*(?:touching|following)|\bJessica\b.{0,80}\bproposal\b|\btake this to the owner\b)/i.test(allNarrative)) pm = 'Jessica';
   if (pm === 'Unattributed' && /(?:Ally feedback|confirmed with Ally|Ally viewed|sent .* Ally)/i.test(allNarrative)) pm = 'Ally';
-  if (/since you own this one/i.test(allNarrative)) { pm = 'Brandon'; if (workSource === '316 Rentals') workSource = 'Brandon-owned'; }
+  if (pm === 'Unattributed' && workSource === 'PMI') { const named=allNarrative.match(/\b(?:approved by|approval (?:from|by)|sent to|texted)\s+(Brad|Randy|Ben|Jessica|Lexi|Ally)\b/i); if(named) pm=titleCase(named[1]); }
+  if (/since you own this one/i.test(allNarrative)) {
+    pm = 'Brandon';
+    if (/\bblu\s*2\b|\bblu2\b/i.test(allNarrative)) workSource = 'Blu 2';
+    else if (/\bsb(?: investments)?\b/i.test(allNarrative)) workSource = 'SB Investments';
+    else if (/\bblu\b/i.test(allNarrative)) workSource = 'Blu';
+    else if (workSource === '316 Rentals') workSource = 'Brandon-owned';
+  }
+  if (/\bblu\b[^.\n]{0,50}\bnot\s+blu\s*2\b/i.test(allNarrative)) workSource = 'Blu';
   if (!job?.closedOn && (pm === 'Melinda' || /taken over for Melinda|Melinda (?:has )?(?:left|quit)|replaced Melinda/i.test(allNarrative))) pm = 'Ben';
-  if (pm === 'Unattributed' && (workSource === 'Blu / Blu 2' || workSource === 'SB Investments')) pm = 'Brandon';
-  const operationallyAuthorized = !!c && pm === 'Brandon' && (workSource === 'Blu / Blu 2' || workSource === 'SB Investments');
+  if (workSource === 'Unknown' && billingCustomer && billingCustomer !== 'Unknown') workSource = 'Direct Customer';
+  if (pm === 'Unattributed' && ['Blu', 'Blu 2', 'SB Investments'].includes(workSource)) pm = 'Brandon';
+  if (pm === 'Unattributed' && workSource === 'Direct Customer') pm = billingCustomer;
+  const operationallyAuthorized = !!c && pm === 'Brandon' && ['Blu', 'Blu 2', 'SB Investments'].includes(workSource);
   if (billingCustomer === '1439 Homes' && (pm === 'Unattributed' || pm === billingCustomer)) pm = 'Brad';
   return { pm, workSource, billingCustomer, sourceCommentId: c?.id || null, sourceText: text, operationallyAuthorized };
 }
@@ -307,7 +314,7 @@ export function buildModel(data, start, end) {
   // stage unclear) — not that money is missing. They never drive the red/yellow Trust
   // Status badge; they're surfaced separately as Housekeeping so a real $ mismatch never
   // gets buried under routine paperwork noise.
-  const HOUSEKEEPING_CODES = new Set(['PM_UNATTRIBUTED', 'PAID_SCOPE_RATIFIED', 'WEAK_SCOPE_MATCH', 'COST_OVER_COMMITMENT', 'UNCOMMITTED_COST', 'POST_CLOSE_NEW_SCOPE', 'OPERATIONAL_STAGE_REVIEW']);
+  const HOUSEKEEPING_CODES = new Set([]);
   const push = (job, severity, code, detail, extra = {}) => exceptions.push({ job: job?.name || 'System', severity: (severity !== 'Info' && HOUSEKEEPING_CODES.has(code)) ? 'Housekeeping' : severity, code, detail, ...extra });
 
   for (const x of Object.values(by)) {
@@ -319,16 +326,19 @@ export function buildModel(data, start, end) {
     const baseDocs = x.orders.filter(d => !isChange(d)).sort((a, b) => new Date(eventDate(a)) - new Date(eventDate(b))), latestBase = baseDocs.at(-1) || null;
     const narrative = `${x.job.description || ''} ${x.comments.map(c => c.message || '').join(' ')} ${x.logs.map(l => l.notes || '').join(' ')}`;
     const lossEvidence = lossRx.test(narrative), trueLoss = !baseApproval && latestBase?.status === 'denied' && lossEvidence, outcomeReview = !baseApproval && latestBase?.status === 'denied' && !lossEvidence;
-    const src = sourceIdentity(x.job, x.comments, commentsById), ev = operationalEvidence(x.job, x.comments, x.logs);
+    const src = sourceIdentity(x.job, x.comments, commentsById), ev = operationalEvidence(x.job, x.comments, x.logs), scheduledAssignment = /(?:called|spoke to)\s+[A-Z][a-z]+[\s\S]{0,220}(?:approved|schedul|start)|\bwhole week blocked off for you\b|\bcan start (?:the )?week of\b/i.test(narrative);
+    for (const c of x.comments.filter(c => c.evidenceSource === 'manual-override' && c.manualOverride)) {
+      const o=c.manualOverride, ageDays=Math.max(0,(Date.now()-new Date(o.confirmedAt).getTime())/86400000), stale=ageDays>Number(o.reviewAfterDays||7);
+      push(x.job, stale?'Review':'Info', stale?'MANUAL_OVERRIDE_STALE':'MANUAL_OPERATIONAL_OVERRIDE', stale?`Manual override from ${o.confirmedBy} on ${String(o.confirmedAt).slice(0,10)} is now ${Math.floor(ageDays)} days old and needs fresh JobTread evidence.`:`Manual override from ${o.confirmedBy} on ${String(o.confirmedAt).slice(0,10)}: ${o.fact} Auto-review after ${o.reviewAfterDays||7} days if JobTread does not supersede it.`);
+    }
     // A vendor bill fully paid is solid proof the work is actually done — you don't pay a
     // vendor in full for unfinished work. But an invoice can legitimately go out mid-job for
     // partial/progress billing (Ian, 09/18/26), so an issued invoice or a partial vendor
     // payment only proves the job is underway (started), never that it's finished (done).
     const vendorBillFullyPaid = x.vendorBills.some(d => Number(d.cost || 0) > TOL && Number(d.amountPaid || 0) >= Number(d.cost || 0) - TOL);
     const vendorBillAnyPaid = x.vendorBills.some(d => Number(d.amountPaid || 0) > TOL);
-    if (vendorBillFullyPaid) { ev.started = true; ev.done = true; }
-    else if (vendorBillAnyPaid || x.invoices.length > 0) { ev.started = true; }
-    if (/316/i.test(x.job.location?.account?.name || '') && src.pm === 'Unattributed') push(x.job, x.job.closedOn ? 'Info' : 'Review', 'PM_UNATTRIBUTED', '316 job has no defensible current PM attribution.');
+    if (vendorBillAnyPaid) ev.started = true; // Payment proves recorded activity, never whole-job completion.
+    if ((approved.length||x.invoices.length||x.vendorBills.length||x.vendorOrders.length) && /316/i.test(x.job.location?.account?.name || '') && src.pm === 'Unattributed') push(x.job, x.job.closedOn ? 'Info' : 'Review', 'PM_UNATTRIBUTED', '316 job has no defensible current PM attribution.');
 
     if (x.job.closedOn && ev.latest && new Date(ev.latest.at) > new Date(x.job.closedOn) && ev.latest.type === 'active') {
       const afterCloseText = x.comments.filter(c => new Date(c.createdAt) > new Date(x.job.closedOn)).map(c => c.message || '').join(' ');
@@ -416,7 +426,7 @@ export function buildModel(data, start, end) {
     const activeVendorNames = Object.keys(vendorCommitByKey), hasOperationalApproval = !!baseApproval || src.operationallyAuthorized;
     let stage = pendingNew && !hasOperationalApproval ? 'Pending Bid' : 'No Approved Work';
     if (hasOperationalApproval && !x.job.closedOn) {
-      if (!activeVendorNames.length && !ev.started) stage = 'Backlog';
+      if (!activeVendorNames.length && !ev.started) stage = scheduledAssignment ? 'Assigned / Not Started' : 'Backlog';
       else if (activeVendorNames.length && !ev.started) stage = 'Assigned / Not Started';
       else if (!activeVendorNames.length && ev.started) stage = 'Review';
       else if (ev.started && !ev.done) stage = 'WIP';
@@ -431,11 +441,16 @@ export function buildModel(data, start, end) {
     const open = ['Backlog', 'Assigned / Not Started', 'WIP', 'Ready to Bill', 'Review'].includes(stage);
     const hasCritical = exceptions.some(e => e.job === x.job.name && e.severity === 'Critical');
     const commitmentGap = Math.max(0, sum(Object.values(commitByKey)) - actualProductionCost);
-    const economicsStatus = open ? 'Provisional' : hasCritical ? 'Exception' : commitmentGap > TOL ? 'Cost incomplete' : 'Reconciled';
-    jobs.push({ ...x, src, ev, baseApproval, latestBase, lossEvidence, approvedChanges, pendingChanges, pendingNew, trueLoss, outcomeReview, contractedProduction, billedProduction, billedPass, passCost, actualProductionCost, feeCost, customerRefundCost, refundEvents, unbilledContracted, remainingCommitByVendor, vendorActualByKey, billedByKey, stage, vendorOrderApproved: x.vendorOrders.some(d => d.status === 'approved'), ar, cashAP, profit, margin, economicsStatus, contractByKey, actualByKey });
+    const financialReview = exceptions.some(e => e.job === x.job.name && ['Critical','Review'].includes(e.severity));
+    const costGap = Math.abs(Number(x.job.actualCost || 0) - sum(x.vendorBills, d => d.cost));
+    if (costGap > TOL) push(x.job, 'Review', 'JOB_COST_LEDGER_MISMATCH', `JobTread actual cost ${money(x.job.actualCost)} differs from valid bill cost ${money(sum(x.vendorBills, d => d.cost))}.`);
+    if (x.job.closedOn && Math.abs(billedPass-passCost)>TOL) push(x.job, 'Review', 'PASS_THROUGH_IMBALANCE', `Pass-through billed ${money(billedPass)} vs recorded cost ${money(passCost)}.`);
+    if (x.job.closedOn && (ar>TOL || cashAP>TOL || unbilledContracted>TOL)) push(x.job, 'Review', 'CLOSED_WITH_OPEN_BALANCE', 'Closed job retains receivable, payable, or unbilled approved work.');
+    const economicsStatus = !x.job.closedOn ? 'Provisional' : hasCritical || financialReview || costGap>TOL || Math.abs(billedPass-passCost)>TOL || ar>TOL || cashAP>TOL || unbilledContracted>TOL ? 'Exception' : commitmentGap > TOL || (billedProduction>TOL && actualProductionCost<=TOL) ? 'Cost incomplete' : 'Reconciled';
+    jobs.push({ ...x, src, ev, scheduledAssignment, baseApproval, latestBase, lossEvidence, approvedChanges, pendingChanges, pendingNew, trueLoss, outcomeReview, contractedProduction, billedProduction, billedPass, passCost, actualProductionCost, feeCost, customerRefundCost, refundEvents, unbilledContracted, remainingCommitByVendor, vendorActualByKey, billedByKey, stage, vendorOrderApproved: x.vendorOrders.some(d => d.status === 'approved'), ar, cashAP, profit, margin, economicsStatus, contractByKey, actualByKey });
   }
 
-  for (const j of jobs) if (j.stage === 'Review' && !exceptions.some(e => e.job === j.job.name && (e.severity === 'Critical' || e.severity === 'Review'))) push(j.job, 'Housekeeping', 'OPERATIONAL_STAGE_REVIEW', 'Operational evidence is insufficient to place this active job confidently; review assignment, completion, or vendor evidence.');
+  for (const j of jobs) if (j.stage === 'Review' && !exceptions.some(e => e.job === j.job.name && (e.severity === 'Critical' || e.severity === 'Review'))) push(j.job, 'Review', 'OPERATIONAL_STAGE_REVIEW', 'Operational evidence is insufficient to place this active job confidently; review assignment, completion, or vendor evidence.');
 
   for (const d of deniedFinancials) push(d.job, 'Info', 'DENIED_FINANCIAL_EXCLUDED', `${d.fullName} is denied audit history and excluded from all totals.`);
   const payments = data.payments || [];
@@ -471,13 +486,14 @@ export function buildModel(data, start, end) {
   const verifiedCashOut = sum(periodPayments.filter(isVerifiedCashOut), p => p.amount);
   const withheldFees = sum(periodPayments.filter(isWithheldFeePayment), p => p.amount);
   const arDocs = invoices.filter(d => Number(d.balance || 0) > TOL), apDocs = vendorBills.filter(d => Number(d.balance || 0) > TOL), current = jobs.filter(j => ['Backlog', 'Assigned / Not Started', 'WIP', 'Ready to Bill', 'Review'].includes(j.stage));
+  const reconciledJobsForVendor = jobs.filter(j => j.economicsStatus === 'Reconciled');
   const vendorCapacityModel = buildVendorCapacity(jobs, end || ymd(new Date())), vendorRows = {};
   for (const j of jobs) for (const vn of new Set([...Object.keys(j.vendorActualByKey || {}), ...Object.keys(j.remainingCommitByVendor || {})])) {
     vendorRows[vn] ||= { vendor: vn, actualCost: 0, remainingCommit: 0, jobs: new Set(), revenue: 0 };
-    const r = vendorRows[vn]; r.actualCost += sum(Object.values(j.vendorActualByKey?.[vn] || {})); r.remainingCommit += Number(j.remainingCommitByVendor?.[vn] || 0); if (r.actualCost || r.remainingCommit) r.jobs.add(j.job.id);
-    const jobActualTotal = j.actualProductionCost || 0; if (jobActualTotal > 0) r.revenue += j.billedProduction * (sum(Object.values(j.vendorActualByKey?.[vn] || {})) / jobActualTotal);
+    const r = vendorRows[vn]; r.actualCost += sum(Object.values(j.vendorActualByKey?.[vn] || {})); if (!j.job.closedOn) r.remainingCommit += Number(j.remainingCommitByVendor?.[vn] || 0); if (!j.job.closedOn && (Number(j.remainingCommitByVendor?.[vn]||0)>TOL || j.vendorOrders.some(d=>d.account?.name===vn))) r.jobs.add(j.job.id);
+    if (j.economicsStatus === 'Reconciled') { for (const [k, vendorCost] of Object.entries(j.vendorActualByKey?.[vn] || {})) { const scopeActual = Number(j.actualByKey?.[k] || 0), scopeBilled = Number(j.billedByKey?.[k] || 0); if (scopeActual > TOL && scopeBilled) r.revenue += scopeBilled * Math.min(Math.max(Number(vendorCost || 0) / scopeActual, 0), 1); } }
   }
-  const vendors = Object.values(vendorRows).map(r => { const cap = vendorCapacityModel[r.vendor] || null, weekly = cap?.rolling8WeeklyCost || 0, gp = r.revenue - r.actualCost; return { name: r.vendor, openJobs: [...r.jobs].filter(id => current.some(j => j.job.id === id)).length, remainingCost: r.remainingCommit, attributedRevenue: r.revenue, actualCost: r.actualCost, gp, margin: r.revenue ? 100 * gp / r.revenue : 0, rolling8WeeklyCost: weekly, lifetimeWeeklyCost: cap?.lifetimeWeeklyCost || 0, capacityConfidence: cap?.confidence || 'Low', capacitySampleJobs: cap?.sampleJobs8 || 0, weeks: weekly > 0 ? r.remainingCommit / weekly : null, read: weekly > 0 ? `${cap.confidence} confidence` : 'Learning' }; }).sort((a, b) => b.actualCost - a.actualCost);
+  const vendors = Object.values(vendorRows).map(r => { const cap = vendorCapacityModel[r.vendor] || null, weekly = cap?.rolling8WeeklyCost || 0; let finalActualCost = 0; for (const j of reconciledJobsForVendor || []) finalActualCost += sum(Object.values(j.vendorActualByKey?.[r.vendor] || {})); const gp = r.revenue - finalActualCost; return { name: r.vendor, openJobs: [...r.jobs].filter(id => current.some(j => j.job.id === id)).length, remainingCost: r.remainingCommit, attributedRevenue: r.revenue, actualCost: r.actualCost, finalActualCost, gp, margin: r.revenue ? 100 * gp / r.revenue : 0, rolling8WeeklyCost: weekly, lifetimeWeeklyCost: cap?.lifetimeWeeklyCost || 0, capacityConfidence: cap?.confidence || 'Low', capacitySampleJobs: cap?.sampleJobs8 || 0, weeks: weekly > 0 ? r.remainingCommit / weekly : null, read: weekly > 0 ? `${cap.confidence} confidence` : 'Learning' }; }).sort((a, b) => b.actualCost - a.actualCost);
   const pmap = {}; for (const j of jobs) { const name = j.src.pm || 'Unattributed'; pmap[name] ||= { name, approvals: 0, approved: 0, pending: 0, lifetimeBilled: 0, reconciledGP: 0 }; if (j.baseApproval && inRange(eventDate(j.baseApproval), start, end)) { pmap[name].approvals++; pmap[name].approved += productionRevenue(j.baseApproval); } if (j.pendingNew) pmap[name].pending++; pmap[name].lifetimeBilled += j.billedProduction; if (j.economicsStatus === 'Reconciled') pmap[name].reconciledGP += j.profit; }
   const pms = Object.values(pmap).map(p => ({ ...p, margin: p.lifetimeBilled ? 100 * p.reconciledGP / p.lifetimeBilled : 0 })).sort((a, b) => b.approved - a.approved);
   const critical = exceptions.filter(e => e.severity === 'Critical'), review = exceptions.filter(e => e.severity === 'Review'), housekeeping = exceptions.filter(e => e.severity === 'Housekeeping'), info = exceptions.filter(e => e.severity === 'Info');

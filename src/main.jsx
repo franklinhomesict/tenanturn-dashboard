@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import ForensicDashboard from './ForensicDashboard'
+import ForensicDashboard from './AuditedDashboard'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

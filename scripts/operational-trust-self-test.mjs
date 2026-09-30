@@ -16,6 +16,6 @@ const data={jobs:[job],docs:[order],comments:[comment],logs:[],tasks:[],payments
 const model=buildForensicModel(data,'2026-09-01','2026-09-30');
 const row=model.jobs.find(x=>x.job.id===job.id);
 assert.equal(row.stage,'Review');
-assert.ok(model.housekeeping.some(e=>e.job===job.name&&e.code==='OPERATIONAL_STAGE_REVIEW'));
-assert.equal(model.trust,'RECONCILED');
+assert.ok(model.review.some(e=>e.job===job.name&&e.code==='OPERATIONAL_STAGE_REVIEW'));
+assert.equal(model.trust,'REVIEW');
 console.log('Operational trust self-test: 1 scenario passed.');

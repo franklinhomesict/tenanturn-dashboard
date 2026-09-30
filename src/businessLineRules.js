@@ -6,7 +6,11 @@ const flooringTurnJobRx=/(?:-\s*(?:lvp|flooring)\b|\bturnover flooring\b)/i;
 const turnoverScopeRx=/\b(?:make ready|make-ready|turnover|unit turn|lvp|flooring|paint|painting|drywall|trim|baseboard|door|doors|blind|blinds|clean|cleaning|trash|haul|lock|lockset|hardware|caulk|patch|touch ?up)\b/i;
 const specialtyScopeRx=/\b(?:tree|roof|roofing|siding|sewer|septic|foundation|gutter|concrete|exterior paint|water heater|plumbing repair|plumbing replacement|hvac|furnace|air conditioner|electrical service|service panel|panel upgrade)\b/i;
 
-export const isPassThroughItem=i=>passRx.test(`${i?.jobCostItem?.name||''} ${i?.name||''} ${i?.description||''}`);
+export const isPassThroughItem=i=>{
+ const name=`${i?.jobCostItem?.name||''} ${i?.name||''}`;
+ if(passRx.test(name))return true;
+ return /materials?|supplies?|receipts?|paint|hardware/i.test(name) && /at cost|no markup|reimburs|pass[- ]?through/i.test(i?.description||'') && (Math.abs(Number(i?.priceWithTax??i?.price??0)-Number(i?.cost??0))<=.02 || Number(i?.priceWithTax??i?.price??0)===0);
+};
 export const isFeeItem=i=>feeRx.test(`${i?.name||''} ${i?.description||''}`);
 
 export function classifyBusinessLine(item,jobName=''){
