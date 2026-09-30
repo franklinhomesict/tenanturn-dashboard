@@ -15,7 +15,7 @@ export const evidenceFingerprints={
   },
   "22PejR5WpTJr": {
     "item": "4ffa9d68",
-    "comment": "6107ef1d"
+    "payment": "1fa6e07"
   },
   "22PejR6yTu65": {
     "item": "8637ffa1",

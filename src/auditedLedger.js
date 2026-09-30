@@ -44,7 +44,7 @@ export function auditedLedger(api,start,end,line='Overall'){
   else{
    const approvals=d.approvalHistory.nodes.filter(e=>e.nextStatus==='approved');
    if(!approvals.some(e=>Math.abs(new Date(e.createdAt)-new Date(d.closedAt))<300000))flag(d.job,'APPROVAL_TIMESTAMP_CONFLICT',`${d.fullName}: current approval timestamp does not match its event history.`,'Critical');
-   if(d.approvalHistory.nodes.some(e=>e.nextPrice!=null&&e.previousPrice!=null&&e.nextPrice!==e.previousPrice&&new Date(e.createdAt)>new Date(d.closedAt)))flag(d.job,'POST_APPROVAL_PRICE_REVISION',`${d.fullName}: price changed after approval; its period sales amount requires review.`);
+   if(d.approvalHistory.nodes.some(e=>e.nextPrice!=null&&e.previousPrice!=null&&e.nextPrice!==e.previousPrice&&new Date(e.createdAt)-new Date(d.closedAt)>300000))flag(d.job,'POST_APPROVAL_PRICE_REVISION',`${d.fullName}: price changed after approval; its period sales amount requires review.`);
   }
  }
  const supportedItems=new Set();
