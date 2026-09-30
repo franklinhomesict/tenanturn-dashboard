@@ -1,9 +1,10 @@
-import {buildForensicModel,normalize,inRange,eventBusinessDate,sum,ymd} from './forensicModel.js';
+import {buildForensicModel,normalize,inRange,eventBusinessDate,sum,ymd,sourceIdentity} from './forensicModel.js';
 import {approvalEvidence} from './approvalEvidence.js';
 import {evidenceFingerprints,digest} from './evidenceFingerprints.js';
 import {classifyBusinessLine,isPassThroughItem,isFeeItem} from './businessLineRules.js';
 import {reconcileAuditedScopes} from './scopeReconciliation.js';
 import {verifiedPriceAdjustments} from './priceAdjustmentEvidence.js';
+import {verifiedOwnerScopes,applyOwnerReviewedExceptions} from './ownerEvidence.js';
 
 const cents=n=>Math.round(Number(n||0)*100);
 const total=(xs,f=x=>x)=>xs.reduce((n,x)=>n+cents(f(x)),0)/100;
@@ -15,7 +16,7 @@ export const production=(d,line='Overall',kind='revenue')=>total(d.costItems?.no
  kind==='revenue'?i.priceWithTax??i.price:i.cost);
 const date=d=>d&&ymd(new Date(d));
 
-export function auditedLedger(api,start,end,line='Overall'){
+export function auditedLedger(api,start,end,line='Overall',{ownerRules,reviewRules}={}){
  const source=normalize(api);
  // Apply only when the relevant historical job is present in this source set.
  const reconciliation=source.jobs.length?reconcileAuditedScopes(source):{data:source,issues:[],applied:[]};
@@ -27,7 +28,9 @@ export function auditedLedger(api,start,end,line='Overall'){
  const ranked=data.docs.filter(d=>valid(d)&&(d.type!=='customerOrder'||d.status==='approved')).slice().sort((a,b)=>['customerOrder','customerInvoice','vendorOrder','vendorBill'].indexOf(a.type)-['customerOrder','customerInvoice','vendorOrder','vendorBill'].indexOf(b.type));
  for(const d of ranked)for(const i of d.costItems?.nodes||[]){const k=`${d.job?.id}|${key(i)}`,v=classifyBusinessLine(i,`${d.job?.name||''} ${d.fullName||''}`);if(v!=='REVIEW'&&!scopeLines.has(k))scopeLines.set(k,v);}
  data.docs=data.docs.map(d=>({...d,costItems:{nodes:(d.costItems?.nodes||[]).map(i=>({...i,auditBusinessLine:scopeLines.get(`${d.job?.id}|${key(i)}`)||classifyBusinessLine(i,`${d.job?.name||''} ${d.fullName||''}`)}))}}));
- const core=buildForensicModel(data,start,end),exceptions=[...core.exceptions,...reconciliation.issues,...reconciliation.applied,...priceChanges.issues];
+ const ownerEvidence=verifiedOwnerScopes(data,sourceIdentity,ownerRules);
+ data.ownerScopes=ownerEvidence.scopes;
+ const core=buildForensicModel(data,start,end),exceptions=applyOwnerReviewedExceptions([...core.exceptions,...reconciliation.issues,...reconciliation.applied,...priceChanges.issues,...ownerEvidence.issues],data,reviewRules);
  const flag=(job,code,detail,severity='Review')=>exceptions.push({job:job?.name||'Source',code,detail,severity});
  const docs=data.docs,byId=new Map(docs.map(d=>[d.id,d])),comments=new Map(data.comments.map(c=>[c.id,c]));
  if(!api?.ok||api.organizationId!=='22Pa5G229Dc7'||!api.sourceCoverage?.complete)flag(null,'SOURCE_NOT_VERIFIED','The complete live JobTread source has not passed the feed checks.','Critical');
@@ -49,10 +52,18 @@ export function auditedLedger(api,start,end,line='Overall'){
  const contractKeys=new Set(orders.flatMap(d=>(d.costItems?.nodes||[]).map(i=>`${d.job?.id}|${key(i)}`)));
  for(const a of priceChanges.allocations)for(const c of a.components)contractKeys.add(`${a.jobId}|${c.key}`);
  const salesEntries=[];
+ // A later formal order for this same scope retains the original approval date.
+ const ownerByKey=new Map(ownerEvidence.scopes.map(s=>[`${s.job.id}|${s.key}`,s]));
+ for(const s of ownerEvidence.scopes)salesEntries.push({...s,date:ymd(new Date(s.approvedAt)),value:line==='Overall'||classify(s.item,s.job.name)===line?s.value:0});
  for(const s of priceChanges.adjustments)salesEntries.push({...s,value:line==='Overall'||classify(s.item,s.job.name)===line?s.value:0});
  for(const d of orders){
   if(!d.closedAt)flag(d.job,'APPROVAL_DATE_MISSING',`${d.fullName} has no approval timestamp. Excluded from period sales.`,'Critical');
-  else salesEntries.push({id:d.id,doc:d,job:d.job,date:eventBusinessDate(d),value:production(d,line),basis:'Approved customer order',kind:/change order/i.test(d.fullName)?'Change order':'Proposal'});
+  else {
+   const repeated=(d.costItems?.nodes||[]).filter(i=>ownerByKey.has(`${d.job?.id}|${key(i)}`));
+   for(const i of repeated)if(cents(i.priceWithTax??i.price)!==cents(ownerByKey.get(`${d.job.id}|${key(i)}`).value))flag(d.job,'OWNER_SCOPE_FORMALIZATION_CHANGED','A later order differs from the original owner-approved scope; reconcile the change before counting sales.','Critical');
+   const remaining={...d,costItems:{nodes:(d.costItems?.nodes||[]).filter(i=>!ownerByKey.has(`${d.job?.id}|${key(i)}`))}};
+   salesEntries.push({id:d.id,doc:d,job:d.job,date:eventBusinessDate(d),value:production(remaining,line),basis:'Approved customer order',kind:/change order/i.test(d.fullName)?'Change order':'Proposal'});
+  }
   if(d.approvalHistory?.nextPage)flag(d.job,'APPROVAL_HISTORY_INCOMPLETE',`${d.fullName}: approval history is incomplete.`,'Critical');
   if(!d.approvalHistory)flag(d.job,'APPROVAL_HISTORY_MISSING',`${d.fullName}: approval history was not loaded.`,'Critical');
   else{
@@ -62,6 +73,7 @@ export function auditedLedger(api,start,end,line='Overall'){
   }
  }
  const supportedItems=new Set();
+ for(const s of ownerEvidence.scopes){supportedItems.add(s.item.id);contractKeys.add(`${s.job.id}|${s.key}`);}
  for(const evidence of approvalEvidence){
   const found=docs.flatMap(d=>(d.costItems?.nodes||[]).filter(i=>i.id===evidence.itemId).map(item=>({d,item})))[0];
   if(!found){flag(null,'AUDITED_SCOPE_MISSING',`Previously audited line ${evidence.itemId} is missing from the live source.`);continue;}
@@ -117,15 +129,29 @@ export function auditedLedger(api,start,end,line='Overall'){
   const allocation=line==='Overall'?0:(total(inv,d=>production(d))>0?billed/total(inv,d=>production(d)):0);
   const cost=total(bill,d=>production(d,line,'cost'))+total(feeBills,d=>d.cost)*allocation;
   const projectedCost=total(jd.filter(d=>d.type==='customerOrder'&&d.status==='approved'),d=>production(d,line,'cost'));
-  const scopeCost=total(salesEntries.filter(s=>s.job?.id===j.job.id&&s.kind==='Additional scope'&&s.value!==0),s=>s.item?.cost||0);
+  const scopeCost=total(salesEntries.filter(s=>s.job?.id===j.job.id&&s.kind==='Additional scope'&&s.value!==0&&!jd.some(d=>d.type==='customerOrder'&&d.status==='approved'&&(d.costItems?.nodes||[]).some(i=>key(i)===key(s.item)))),s=>s.item?.cost||0);
   const lineCommitByVendor={};
   for(const d of j.vendorOrders)for(const i of d.costItems?.nodes||[]){if(isPassThroughItem(i)||(line!=='Overall'&&classify(i,`${j.job.name} ${d.fullName}`)!==line))continue;const vn=d.account?.name||'Unknown',k=key(i);(lineCommitByVendor[vn]||={})[k]=((lineCommitByVendor[vn]||{})[k]||0)+Number(i.cost||0);}
   const remainingByVendor=Object.fromEntries(Object.entries(lineCommitByVendor).map(([vn,values])=>[vn,total(Object.entries(values),([k,c])=>Math.max(0,c-(j.vendorActualByKey?.[vn]?.[k]||0)))]));
   const remainingCommit=total(Object.values(remainingByVendor));
-  const planned=Math.max(projectedCost+scopeCost,cost+remainingCommit);
+  let planned=Math.max(projectedCost+scopeCost,cost+remainingCommit);
+  if(line==='Overall'){
+   // Prevent one business line's unused budget from hiding another's overrun.
+   // Overall must equal the sum of the same per-line job budgets shown in detail.
+   planned=total(['MR','CS','REVIEW'],group=>{
+    const groupBilling=total(inv,d=>production(d,group)),allBilling=total(inv,d=>production(d));
+    const groupCost=total(bill,d=>production(d,group,'cost'))+total(feeBills,d=>d.cost)*(allBilling>0?groupBilling/allBilling:0);
+    const groupBudget=total(jd.filter(d=>d.type==='customerOrder'&&d.status==='approved'),d=>production(d,group,'cost'))+total(salesEntries.filter(s=>s.job?.id===j.job.id&&s.kind==='Additional scope'&&classify(s.item,j.job.name)===group&&!jd.some(d=>d.type==='customerOrder'&&d.status==='approved'&&(d.costItems?.nodes||[]).some(i=>key(i)===key(s.item)))),s=>s.item.cost);
+    const commitments={};
+    for(const d of j.vendorOrders)for(const i of d.costItems?.nodes||[])if(!isPassThroughItem(i)&&classify(i,`${j.job.name} ${d.fullName}`)===group){const vn=d.account?.name||'Unknown',k=key(i);(commitments[vn]||={})[k]=((commitments[vn]||{})[k]||0)+Number(i.cost||0);}
+    const remainder=total(Object.entries(commitments),([vn,ks])=>total(Object.entries(ks),([k,c])=>Math.max(0,c-(j.vendorActualByKey?.[vn]?.[k]||0))));
+    return Math.max(groupBudget,groupCost+remainder);
+   });
+  }
   if(remainingCommit>0&&planned>projectedCost+scopeCost+.02)flag(j.job,'COMMITTED_COST_WITHOUT_APPROVED_REVENUE','Vendor commitments exceed the cost budget of approved customer scope; projected profit retains the committed cost.');
   const reviews=exceptions.filter(e=>e.job===j.job.name&&['Critical','Review'].includes(e.severity));
-  return {...j,remainingByVendor,approved,billed,cost,profitRecorded:billed-cost,projectedCost:planned,projectedProfit:approved-planned,remainingBudget:Math.max(0,planned-cost),status:!j.job.closedOn?'Open / provisional':reviews.length?'Closed / review':j.economicsStatus==='Reconciled'?'Closed / checked':'Closed / cost incomplete',reviews:reviews.length};
+  const ownerReviewed=exceptions.some(e=>e.job===j.job.name&&e.severity==='Owner reviewed');
+  return {...j,remainingByVendor,approved,billed,cost,profitRecorded:billed-cost,projectedCost:planned,projectedProfit:approved-planned,remainingBudget:Math.max(0,planned-cost),status:!j.job.closedOn?'Open / provisional':reviews.length?'Closed / review':ownerReviewed?'Closed / owner reviewed':j.economicsStatus==='Reconciled'?'Closed / checked':'Closed / cost incomplete',reviews:reviews.length,ownerReviewed};
  });
  const current=jobRows.filter(j=>!j.job.closedOn&&(j.approved!==0||j.billed!==0||j.cost!==0||j.vendorOrders.some(d=>production(d,line,'cost')!==0))); 
  const periodInvoices=invoices.filter(d=>inRange(d.issueDate,start,end));

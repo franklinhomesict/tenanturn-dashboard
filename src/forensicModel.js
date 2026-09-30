@@ -89,15 +89,18 @@ function documentLineTotal(doc) {
 }
 function documentTotal(doc) { return doc.type?.startsWith('customer') ? Number(doc.priceWithTax || 0) : Number(doc.cost || 0); }
 
+// Organization notes can contain several addresses and incidental trade words.
+// Only the request heading identifies which job the note is about.
+const requestHeading = c => cleanName(String(c?.message || '').split(/\r?\n/).find(l => l.trim()) || '');
+const requestType = text => {
+  const t=cleanName(text);
+  if (/make ready|\bmr\b|turnover/.test(t)) return 'MR';
+  for (const type of ['water heater','plumbing','tree','roof','siding','sewer','hvac','fence']) if(t.includes(type)) return type;
+  return null;
+};
 function sourceScopeScore(job, c) {
-  const j = cleanName(job?.name || ''), t = cleanName(c?.message || '');
-  let score = 10;
-  const specialized = [['tree', /\btree\b/], ['roof', /\broof\b/], ['siding', /\bsiding\b/], ['water heater', /water heater/]];
-  for (const [token, rx] of specialized) if (j.includes(token)) score += rx.test(t) ? 5 : -5;
-  if (/make ready|\bmr\b/.test(j)) score += /tree work|tree removal|\broof\b|\bsiding\b/.test(t) ? -3 : 1;
-  if (structuredPmRx.test(c?.message || '')) score += 2;
-  if (/316|blu\s*2|\bblu\b|\bsb\b|pmi|jn investments/i.test(c?.message || '')) score += 1;
-  return score;
+  const a=requestType(job?.name), b=requestType(requestHeading(c));
+  return a && b ? (a===b ? 20 : 0) : (structuredPmRx.test(c.message||'')||/^\s*owner\s*[:=-]?\s*\S+/im.test(c.message||'') ? 10 : 0);
 }
 function sourceComment(job, jobComments, commentsById) {
   const ref = String(job?.description || '').match(/org comment\s+([A-Za-z0-9]+)/i)?.[1];
@@ -106,17 +109,18 @@ function sourceComment(job, jobComments, commentsById) {
   if (local) return local;
   const address = cleanName(String(job?.name || '').split(' - ')[0]);
   if (address.length < 6) return null;
-  const candidates = Object.values(commentsById).filter(c => c?.isPinned && !c?.job?.id && cleanName(c.message || '').includes(address)).map(c => ({ c, score: sourceScopeScore(job, c) })).sort((a, b) => b.score - a.score || new Date(a.c.createdAt) - new Date(b.c.createdAt));
+  const candidates = Object.values(commentsById).filter(c => c?.isPinned && !c?.job?.id && (` ${requestHeading(c)} `).includes(` ${address} `)).map(c => ({ c, score: sourceScopeScore(job, c) })).sort((a, b) => b.score - a.score || new Date(a.c.createdAt) - new Date(b.c.createdAt));
   if (!candidates.length || candidates[0].score < 9) return null;
   if (candidates[1] && candidates[0].score === candidates[1].score) return null;
   return candidates[0].c;
 }
 function titleCase(s) { return String(s || '').toLowerCase().replace(/\b[a-z]/g, m => m.toUpperCase()); }
-function sourceIdentity(job, jobComments, commentsById) {
+export function sourceIdentity(job, jobComments, commentsById) {
   const c = sourceComment(job, jobComments, commentsById);
   const text = c?.message || job?.description || '';
   const pmLine = text.split(/\r?\n/).find(l => structuredPmRx.test(l)) || '';
-  const sourceProbe = pmLine || text.slice(0, 800);
+  const ownerLine = text.split(/\r?\n/).find(l => /^\s*owner\s*[:=-]?\s*\S+/i.test(l)) || '';
+  const sourceProbe = ownerLine || pmLine || text.slice(0, 800);
   const billingCustomer = job?.location?.account?.name || 'Unknown';
   const allNarrative = `${job?.description || ''} ${(jobComments || []).map(x => x.message || '').join(' ')}`;
   let workSource = 'Unknown';
@@ -156,7 +160,7 @@ function sourceIdentity(job, jobComments, commentsById) {
   if (/\bblu\b[^.\n]{0,50}\bnot\s+blu\s*2\b/i.test(allNarrative)) workSource = 'Blu';
   if (!job?.closedOn && (pm === 'Melinda' || /taken over for Melinda|Melinda (?:has )?(?:left|quit)|replaced Melinda/i.test(allNarrative))) pm = 'Ben';
   if (workSource === 'Unknown' && billingCustomer && billingCustomer !== 'Unknown') workSource = 'Direct Customer';
-  if (pm === 'Unattributed' && ['Blu', 'Blu 2', 'SB Investments'].includes(workSource)) pm = 'Brandon';
+  if (['Blu', 'Blu 2', 'SB Investments'].includes(workSource)) pm = 'Brandon';
   if (pm === 'Unattributed' && workSource === 'Direct Customer') pm = billingCustomer;
   const operationallyAuthorized = !!c && pm === 'Brandon' && ['Blu', 'Blu 2', 'SB Investments'].includes(workSource);
   if (billingCustomer === '1439 Homes' && (pm === 'Unattributed' || pm === billingCustomer)) pm = 'Brad';
@@ -377,6 +381,9 @@ export function buildModel(data, start, end) {
     }
     for (const a of data.scopeAdjustments || []) if (a.job?.id === x.job.id) add(contractByKey, a.key, a.value);
     for (const d of approved) for (const e of entries(d, 'cost')) if (!e.pass && e.strong) add(approvedCostByKey, e.key, e.amount);
+    for (const s of data.ownerScopes || []) if(s.job.id===x.job.id && !Object.hasOwn(contractByKey,s.key)) {
+      add(contractByKey,s.key,s.value); add(approvedCostByKey,s.key,s.cost);
+    }
     for (const d of x.invoices) {
       const lineTotal = documentLineTotal(d); if (lineTotal != null && Math.abs(lineTotal - documentTotal(d)) > TOL) push(x.job, 'Critical', 'INVOICE_TOTAL_MISMATCH', `${d.fullName}: lines ${money(lineTotal)} do not tie to ${money(documentTotal(d))}.`);
       const applied = dpByDoc[d.id] || 0; if (Math.abs(applied - Number(d.amountPaid || 0)) > TOL) push(x.job, 'Critical', 'INVOICE_PAYMENT_MISMATCH', `${d.fullName}: amountPaid ${money(d.amountPaid)} vs linked payments ${money(applied)}.`);
@@ -526,13 +533,16 @@ export function buildModel(data, start, end) {
   const pms = Object.values(pmap).map(p => ({ ...p, margin: p.lifetimeBilled ? 100 * p.reconciledGP / p.lifetimeBilled : 0 })).sort((a, b) => b.approved - a.approved);
   const critical = exceptions.filter(e => e.severity === 'Critical'), review = exceptions.filter(e => e.severity === 'Review'), housekeeping = exceptions.filter(e => e.severity === 'Housekeeping'), info = exceptions.filter(e => e.severity === 'Info');
   const reconciledJobs = jobs.filter(j => j.economicsStatus === 'Reconciled'), reconciledGP = sum(reconciledJobs, j => j.profit), provisionalGP = sum(jobs.filter(j => j.economicsStatus === 'Provisional'), j => j.profit);
-  const heldCustomerCredits = sum(payments.filter(p=>p.account?.type==='customer'&&isVerifiedCashIn(p)&&!isReturnedEvent(p)&&Number(p.amountUnapplied||0)>TOL),p=>p.amountUnapplied);
-  const customerPaymentsApplied = sum((data.documentPayments || []).filter(dp => dp.document?.type === 'customerInvoice' && dp.payment?.type === 'credit' && inRange(dp.payment?.paidAt, start, end) && !isReturnedEvent(dp.payment)), dp => dp.amount);
+  const heldCreditRows=payments.filter(p=>p.account?.type==='customer'&&isVerifiedCashIn(p)&&!isReturnedEvent(p)&&Number(p.amountUnapplied||0)>TOL);
+  const appliedPaymentRows=(data.documentPayments || []).filter(dp => dp.document?.type === 'customerInvoice' && dp.payment?.type === 'credit' && inRange(dp.payment?.paidAt, start, end) && !isReturnedEvent(dp.payment));
+  const heldCustomerCredits = sum(heldCreditRows,p=>p.amountUnapplied);
+  const customerPaymentsApplied = sum(appliedPaymentRows, dp => dp.amount);
   const refunds = jobs.flatMap(j => (j.refundEvents || []).map(r => ({ job: j.job.name, ...r })));
   const severityRank = { Critical: 0, Review: 1, Housekeeping: 2, Info: 3 };
   const result = { jobs, exceptions: exceptions.sort((a, b) => (severityRank[a.severity] ?? 4) - (severityRank[b.severity] ?? 4)), trust: critical.length ? 'BLOCKED' : review.length ? 'REVIEW' : 'RECONCILED', critical, review, housekeeping, info, criticalCount: critical.length, reviewCount: review.length, housekeepingCount: housekeeping.length, infoCount: info.length, sales: { wins, losses, pendingNew, approvedChanges, pendingChanges, winRate, salesWon }, finance: { periodBilled, periodPass, verifiedCashIn, confirmedCashIn, cashDirected, verifiedCashOut, withheldFees, ar: sum(arDocs, d => d.balance), ap: sum(apDocs, d => d.balance), refunds }, ops: { current }, people: { vendors, vendorCapacityModel, pms }, wins, losses, pendingNew, approvedChanges, pendingChanges, winRate, salesWon, periodBilled, periodPass, verifiedCashIn, confirmedCashIn, cashDirected, verifiedCashOut, withheldFees, customerPaymentsApplied, heldCustomerCredits, netVerifiedCash: confirmedCashIn - verifiedCashOut, arDocs, apDocs, current, vendors, pms, refunds, reconciledJobs, reconciledGP, provisionalGP, outcomeReviews: jobs.filter(j => j.outcomeReview) };
   result.audit = { critical: critical.length, review: review.length, housekeeping: housekeeping.length, info: info.length };
   result.cash = { in: confirmedCashIn, directed: cashDirected, out: verifiedCashOut, withheldFees };
+  result.heldCreditRows=heldCreditRows; result.appliedPaymentRows=appliedPaymentRows;
   return result;
 }
 export const buildForensicModel = buildModel;

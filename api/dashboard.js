@@ -87,7 +87,7 @@ const costItemConnection = page => ({
 
 const commentConnection = page => ({
   $: { size: 100, ...(page ? { page } : {}), sortBy: [{ field: 'createdAt', order: 'desc' }] },
-  nodes: { id: {}, createdAt: {}, isPinned: {}, name: {}, message: {}, job: { id: {}, number: {}, name: {} } },
+  nodes: { id: {}, createdAt: {}, createdByUser: {id:{},name:{}}, isPinned: {}, name: {}, message: {}, job: { id: {}, number: {}, name: {} } },
   nextPage: {}
 });
 
@@ -275,6 +275,7 @@ export default async function handler(req, res) {
     const apiResponse = {
       sourceCoverage:{complete:true,startedAt,checkedAt:new Date().toISOString(),documentsStable:true,allCollectionsStable:true,counts:{jobs:jobs.count,documents:documentHeaders.count,costItems:costItems.count,comments:rawComments.count,dailyLogs:dailyLogs.count,tasks:tasks.count,payments:payments.count,documentPayments:documentPayments.count}},
       ok: true,
+      release: {commit:process.env.VERCEL_GIT_COMMIT_SHA||null,environment:process.env.VERCEL_ENV||'local'},
       fetchedAt: new Date().toISOString(),
       organizationId: org.id,
       organizationName: org.name,
@@ -284,7 +285,7 @@ export default async function handler(req, res) {
     if (String(req.query?.audit || '') === '1') {
       const start = String(req.query?.start || new Date().toISOString().slice(0,7)+'-01');
       const end = String(req.query?.end || new Date().toISOString().slice(0,10));
-      return res.status(200).json({ ok: true, fetchedAt: apiResponse.fetchedAt, organizationId: org.id, organizationName: org.name, audit: compactAudit(apiResponse, start, end) });
+      return res.status(200).json({ ok: true, release:apiResponse.release, fetchedAt: apiResponse.fetchedAt, organizationId: org.id, organizationName: org.name, audit: compactAudit(apiResponse, start, end) });
     }
 
     return res.status(200).json(apiResponse);
