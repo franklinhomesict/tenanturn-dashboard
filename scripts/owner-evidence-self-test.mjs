@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import {sourceIdentity} from '../src/forensicModel.js';
+import {verifiedOwnerScopes,scopeFingerprint,commentFingerprint,applyOwnerReviewedExceptions,reviewedInvoiceFingerprint} from '../src/ownerEvidence.js';
+import {auditedLedger} from '../src/auditedLedger.js';
+
+const job={id:'synthetic-job',name:'123 Example - Make Ready',location:{account:{name:'316 Rentals'}},actualCost:0};
+const note=(id,heading,body)=>({id,isPinned:true,message:`${heading}\n${body}`,createdAt:'2026-08-01T15:00:00Z'});
+const identity=comments=>sourceIdentity(job,[],Object.fromEntries(comments.map(c=>[c.id,c])));
+const mr=note('mr','123 Example make ready','Owner SB\nPM: Ben 316\nRepair tree damage and plumbing');
+const tree=note('tree','123 Example tree removal','PM: Jessica 316\nMake ready later');
+assert.equal(identity([tree,mr]).sourceCommentId,'mr');
+assert.equal(identity([tree,mr]).pm,'Brandon');
+assert.equal(identity([tree,mr]).billingCustomer,'316 Rentals');
+assert.equal(identity([tree,mr]).workSource,'SB Investments');
+assert.equal(identity([mr,{...mr,id:'conflict',message:mr.message.replace('SB','BLU 2')}]).sourceCommentId,null);
+assert.equal(identity([tree]).sourceCommentId,null);
+assert.equal(identity([note('incidental','Different address make ready','Owner SB\n123 Example')]).sourceCommentId,null);
+assert.equal(identity([note('near','123 Exampleton make ready','Owner SB')]).sourceCommentId,null);
+for(const owner of ['BLU','BLU 2','SB'])assert.equal(identity([note(owner,'123 Example make ready',`Owner ${owner}\nPM Ben 316`)]).pm,'Brandon');
+
+const c={...note('owner','123 Example work order','Labor bid $240 / cost to compete $140 (send to vendor)'),createdAt:'2026-08-27T17:30:53Z',createdByUser:{id:'owner-user'}};
+const item={id:'scope-item',name:'Make Ready Labor',description:'Synthetic second work order',priceWithTax:240,cost:140,jobCostItem:{id:'scope-key'}};
+const inv={id:'draft-invoice',job,type:'customerInvoice',status:'draft',costItems:{nodes:[item]},priceWithTax:240,cost:140,amountPaid:0,balance:0};
+const wo={id:'work-order',job,type:'vendorOrder',status:'approved',account:{name:'Test Vendor'},costItems:{nodes:[{...item,id:'wo-item',priceWithTax:0}]},cost:140};
+const data={jobs:[job],docs:[inv,wo],comments:[mr,c],logs:[],tasks:[],payments:[],documentPayments:[]};
+const rule={jobId:job.id,commentId:c.id,userId:'owner-user',documentId:inv.id,itemId:item.id,vendorOrderId:wo.id,commentHash:commentFingerprint(c),itemHash:scopeFingerprint(item)};
+const validate=d=>verifiedOwnerScopes(d,sourceIdentity,[rule]);
+assert.equal(validate(data).scopes.length,1);
+for(const mutate of [d=>{d.comments[1].createdByUser.id='imposter'},d=>{delete d.comments[1].createdByUser},d=>{d.comments[1].createdAt='2026-09-01T00:00:00Z'},d=>{d.comments[1].message+=' changed'},d=>{d.docs[0].costItems.nodes[0].priceWithTax++},d=>{d.docs[0].status='denied'},d=>{d.docs[1].status='draft'},d=>{d.comments[0].message=d.comments[0].message.replace('Owner SB','Owner unrelated')}]){const changed=structuredClone(data);mutate(changed);assert.equal(validate(changed).scopes.length,0);assert.equal(validate(changed).issues[0].severity,'Critical');}
+const api={ok:true,organizationId:'22Pa5G229Dc7',sourceCoverage:{complete:true},payload:{organization:{jobs:{nodes:data.jobs},documents:{nodes:data.docs},comments:{nodes:data.comments}}}};
+const run=(a,start='2026-08-01',end='2026-08-31')=>auditedLedger(a,start,end,'Overall',{ownerRules:[rule],reviewRules:[]});
+let m=run(api);assert.equal(m.sales,240);assert.equal(m.billed,0);assert.equal(m.jobs[0].cost,0);assert.equal(m.jobs[0].projectedProfit,100);assert.equal(m.jobs[0].unbilledContracted,240);assert.equal(run(api,'2026-09-01','2026-09-30').sales,0);
+const later=structuredClone(api),doc=later.payload.organization.documents.nodes[0];doc.status='pending';doc.issueDate='2026-09-02';doc.balance=240;
+assert.equal(run(later).sales,240);assert.equal(run(later,'2026-09-01','2026-09-30').billed,240);
+later.payload.organization.documents.nodes.push({...doc,id:'formal-order',type:'customerOrder',status:'approved',closedAt:'2026-09-03T16:00:00Z',approvalHistory:{nodes:[{createdAt:'2026-09-03T16:00:00Z',nextStatus:'approved'}]}});
+assert.equal(run(later).sales,240);assert.equal(run(later,'2026-09-01','2026-09-30').sales,0);assert.equal(run(later).jobs[0].projectedCost,140);
+const reviewed={...inv,id:'review-invoice',status:'approved',priceWithTax:50,amountPaid:50,costItems:{nodes:[{id:'pass',name:'Materials reimbursement',description:'Synthetic receipt',priceWithTax:50,cost:50}]}};
+const ex={job:job.name,severity:'Review',code:'PASS_THROUGH_IMBALANCE',detail:'Original discrepancy'};
+const reviewData={jobs:[job],docs:[reviewed]},reviewRules=[{jobId:job.id,documentId:reviewed.id,hash:reviewedInvoiceFingerprint(reviewed),reviewedOn:'2026-09-30'}];
+const accepted=applyOwnerReviewedExceptions([ex],reviewData,reviewRules)[0];assert.equal(accepted.severity,'Owner reviewed');assert.equal(accepted.financiallySettled,false);assert.ok(accepted.detail.includes(ex.detail));
+reviewed.amountPaid--;assert.equal(applyOwnerReviewedExceptions([ex],reviewData,reviewRules)[0].severity,'Review');
+console.log('Owner evidence: heading conflicts, owner/PM separation, author/date/amount guards, draft exclusion, original approval date, later formalization, and reviewed-not-settled exception passed.');

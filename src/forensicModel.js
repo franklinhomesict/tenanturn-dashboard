@@ -35,7 +35,7 @@ export const eventDate = d => d?.closedAt || d?.signedAt || d?.issueDate || d?.c
 export const eventBusinessDate = d => localDate(eventDate(d));
 const validMoneyStatus = s => s === 'pending' || s === 'approved';
 const cleanName = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-const strongScopeKey = i => i?.jobCostItem?.id || i?.sourceCostItem?.id || null;
+const strongScopeKey = i => i?.auditScopeKey || i?.jobCostItem?.id || i?.sourceCostItem?.id || null;
 const weakScopeKey = i => i?.name ? `NAME:${cleanName(i.name)}` : null;
 const lineRevenue = i => Number(i?.priceWithTax ?? i?.price ?? 0) || 0;
 const lineCost = i => Number(i?.cost ?? 0) || 0;
@@ -89,15 +89,18 @@ function documentLineTotal(doc) {
 }
 function documentTotal(doc) { return doc.type?.startsWith('customer') ? Number(doc.priceWithTax || 0) : Number(doc.cost || 0); }
 
+// Organization notes can contain several addresses and incidental trade words.
+// Only the request heading identifies which job the note is about.
+const requestHeading = c => cleanName(String(c?.message || '').split(/\r?\n/).find(l => l.trim()) || '');
+const requestType = text => {
+  const t=cleanName(text);
+  if (/make ready|\bmr\b|turnover/.test(t)) return 'MR';
+  for (const type of ['water heater','plumbing','tree','roof','siding','sewer','hvac','fence']) if(t.includes(type)) return type;
+  return null;
+};
 function sourceScopeScore(job, c) {
-  const j = cleanName(job?.name || ''), t = cleanName(c?.message || '');
-  let score = 10;
-  const specialized = [['tree', /\btree\b/], ['roof', /\broof\b/], ['siding', /\bsiding\b/], ['water heater', /water heater/]];
-  for (const [token, rx] of specialized) if (j.includes(token)) score += rx.test(t) ? 5 : -5;
-  if (/make ready|\bmr\b/.test(j)) score += /tree work|tree removal|\broof\b|\bsiding\b/.test(t) ? -3 : 1;
-  if (structuredPmRx.test(c?.message || '')) score += 2;
-  if (/316|blu\s*2|\bblu\b|\bsb\b|pmi|jn investments/i.test(c?.message || '')) score += 1;
-  return score;
+  const a=requestType(job?.name), b=requestType(requestHeading(c));
+  return a && b ? (a===b ? 20 : 0) : (structuredPmRx.test(c.message||'')||/^\s*owner\s*[:=-]?\s*\S+/im.test(c.message||'') ? 10 : 0);
 }
 function sourceComment(job, jobComments, commentsById) {
   const ref = String(job?.description || '').match(/org comment\s+([A-Za-z0-9]+)/i)?.[1];
@@ -106,17 +109,18 @@ function sourceComment(job, jobComments, commentsById) {
   if (local) return local;
   const address = cleanName(String(job?.name || '').split(' - ')[0]);
   if (address.length < 6) return null;
-  const candidates = Object.values(commentsById).filter(c => c?.isPinned && !c?.job?.id && cleanName(c.message || '').includes(address)).map(c => ({ c, score: sourceScopeScore(job, c) })).sort((a, b) => b.score - a.score || new Date(a.c.createdAt) - new Date(b.c.createdAt));
+  const candidates = Object.values(commentsById).filter(c => c?.isPinned && !c?.job?.id && (` ${requestHeading(c)} `).includes(` ${address} `)).map(c => ({ c, score: sourceScopeScore(job, c) })).sort((a, b) => b.score - a.score || new Date(a.c.createdAt) - new Date(b.c.createdAt));
   if (!candidates.length || candidates[0].score < 9) return null;
   if (candidates[1] && candidates[0].score === candidates[1].score) return null;
   return candidates[0].c;
 }
 function titleCase(s) { return String(s || '').toLowerCase().replace(/\b[a-z]/g, m => m.toUpperCase()); }
-function sourceIdentity(job, jobComments, commentsById) {
+export function sourceIdentity(job, jobComments, commentsById) {
   const c = sourceComment(job, jobComments, commentsById);
   const text = c?.message || job?.description || '';
   const pmLine = text.split(/\r?\n/).find(l => structuredPmRx.test(l)) || '';
-  const sourceProbe = pmLine || text.slice(0, 800);
+  const ownerLine = text.split(/\r?\n/).find(l => /^\s*owner\s*[:=-]?\s*\S+/i.test(l)) || '';
+  const sourceProbe = ownerLine || pmLine || text.slice(0, 800);
   const billingCustomer = job?.location?.account?.name || 'Unknown';
   const allNarrative = `${job?.description || ''} ${(jobComments || []).map(x => x.message || '').join(' ')}`;
   let workSource = 'Unknown';
@@ -156,7 +160,7 @@ function sourceIdentity(job, jobComments, commentsById) {
   if (/\bblu\b[^.\n]{0,50}\bnot\s+blu\s*2\b/i.test(allNarrative)) workSource = 'Blu';
   if (!job?.closedOn && (pm === 'Melinda' || /taken over for Melinda|Melinda (?:has )?(?:left|quit)|replaced Melinda/i.test(allNarrative))) pm = 'Ben';
   if (workSource === 'Unknown' && billingCustomer && billingCustomer !== 'Unknown') workSource = 'Direct Customer';
-  if (pm === 'Unattributed' && ['Blu', 'Blu 2', 'SB Investments'].includes(workSource)) pm = 'Brandon';
+  if (['Blu', 'Blu 2', 'SB Investments'].includes(workSource)) pm = 'Brandon';
   if (pm === 'Unattributed' && workSource === 'Direct Customer') pm = billingCustomer;
   const operationallyAuthorized = !!c && pm === 'Brandon' && ['Blu', 'Blu 2', 'SB Investments'].includes(workSource);
   if (billingCustomer === '1439 Homes' && (pm === 'Unattributed' || pm === billingCustomer)) pm = 'Brad';
@@ -183,19 +187,22 @@ function activityBelongsToJob(job, text) {
 }
 function operationalEvidence(job, comments, logs) {
   const ops = [];
+  const hold = t => /\bon hold\b|\bhold\b[^.\n]{0,100}\b(?:job|work|bath|repair|closing)\b|\bclosing\b[^.\n]{0,80}\b(?:delayed|pushed back)\b/i.test(t);
   for (const l of logs || []) if (l.date && String(l.notes || '').trim()) {
     const t = l.notes || '';
-    if (isWholeDoneText(t)) ops.push({ at: l.date, type: 'done', text: t, kind: 'log' });
+    if (hold(t)) ops.push({ at: l.date, type: 'hold', text: t, kind: 'log' });
+    else if (isWholeDoneText(t)) ops.push({ at: l.date, type: 'done', text: t, kind: 'log' });
     else if (activityBelongsToJob(job, t)) ops.push({ at: l.date, type: 'active', text: t, kind: 'log' });
   }
   for (const c of comments || []) {
     const t = c.message || '';
-    if (isWholeDoneText(t)) ops.push({ at: c.createdAt, type: 'done', text: t, kind: 'comment' });
+    if (hold(t)) ops.push({ at: c.createdAt, type: 'hold', text: t, kind: 'comment' });
+    else if (isWholeDoneText(t)) ops.push({ at: c.createdAt, type: 'done', text: t, kind: 'comment' });
     else if (activityBelongsToJob(job, t)) ops.push({ at: c.createdAt, type: 'active', text: t, kind: 'comment' });
   }
   ops.sort((a, b) => new Date(a.at) - new Date(b.at));
   const latest = ops.at(-1) || null;
-  return { started: ops.some(x => x.type === 'active') || Number(job?.taskSummary?.started || 0) > 0, done: latest?.type === 'done', firstStart: ops.find(x => x.type === 'active')?.at || null, latest };
+  return { started: ops.some(x => x.type === 'active') || Number(job?.taskSummary?.started || 0) > 0, done: latest?.type === 'done', onHold: latest?.type === 'hold', firstStart: ops.find(x => x.type === 'active')?.at || null, latest };
 }
 
 function paymentText(p) { return `${p?.source || ''} ${p?.description || ''}`; }
@@ -229,12 +236,23 @@ function isVerifiedCashOut(p) {
   if (p?.type !== 'debit' || isReturnedEvent(p) || isWithheldFeePayment(p) || Number(p?.amountApplied || 0) <= TOL) return false;
   return /1294|6268|tenanturn|businesspro|meritrust|\bach\b|\bcheck\b|pay a person|bank transfer/i.test(t);
 }
-function findCorrection(p, payments) {
+function findCorrection(p, payments, documentPayments = []) {
   const acct = p.account?.name || '', amt = Number(p.amount || 0), badMisroute = isBadMisroute(p);
   return (payments || []).find(q => {
-    if (q.id === p.id || Math.abs(Number(q.amount || 0) - amt) > TOL || new Date(q.paidAt) <= new Date(p.paidAt)) return false;
-    if (badMisroute) return q.type === 'credit' && isCorrectiveDeposit(q) && cashInClass(q) === 'confirmed';
-    return q.account?.name === acct && p.type === 'debit' && q.type === 'debit' && Number(q.amountApplied || 0) > TOL && !isReturnedEvent(q);
+    if (q.id === p.id || new Date(q.paidAt) <= new Date(p.paidAt)) return false;
+    const sameAmount = Math.abs(Number(q.amount || 0) - amt) <= TOL;
+    if (badMisroute) return sameAmount && q.type === 'credit' && isCorrectiveDeposit(q) && cashInClass(q) === 'confirmed';
+    if (q.account?.id !== p.account?.id || q.account?.name !== acct || p.type !== 'debit' || q.type !== 'debit' || Number(q.amountApplied || 0) <= TOL || isReturnedEvent(q)) return false;
+    if (sameAmount) return true;
+    // A replacement check may cover multiple bills. Match a paid allocation to
+    // the exact vendor, amount and property named in the returned payment.
+    const allocations = documentPayments.filter(dp => dp.payment?.id === q.id);
+    if (Math.abs(sum(allocations, dp => dp.amount) - Number(q.amountApplied)) > TOL) return false;
+    const originalText = ` ${cleanName(paymentText(p))} `;
+    return allocations.some(dp => {
+      const d = dp.document, address = cleanName(String(d?.job?.name || '').split(' - ')[0]);
+      return d?.type === 'vendorBill' && ['pending','approved'].includes(d.status) && d.account?.id === p.account?.id && Number(d.balance) <= TOL && Math.abs(Number(dp.amount) - amt) <= TOL && /^\d+\s/.test(address) && address.length >= 8 && originalText.includes(` ${address} `);
+    });
   });
 }
 function completionDateForJob(j) { if (j.job?.closedOn) return j.job.closedOn; if (j.ev?.done && j.ev?.latest?.at) return j.ev.latest.at; return null; }
@@ -350,13 +368,22 @@ export function buildModel(data, start, end) {
       } else push(x.job, 'Critical', 'ACTIVE_AFTER_JOB_CLOSED', 'Production evidence exists after the JobTread close date.');
     }
 
-    const contractByKey = {}, billedByKey = {}, actualByKey = {}, commitByKey = {}, vendorCommitByKey = {}, vendorActualByKey = {}, billedMeta = {};
+    const contractByKey = {}, approvedCostByKey = {}, billedByKey = {}, actualByKey = {}, commitByKey = {}, vendorCommitByKey = {}, vendorActualByKey = {}, billedMeta = {};
     const actualNotedKeys = new Set();
     let billedPass = 0, passCost = 0, feeCost = 0, customerRefundCost = 0;
     const refundEvents = [];
     const weakContract = new Map(), weakBilled = new Map(), weakActual = new Map(), weakCommit = new Map();
     const recordWeak = (map, e, doc) => { if (!e.weak) return; const arr = map.get(e.key) || []; arr.push({ docId: doc.id, docName: doc.fullName, amount: e.amount }); map.set(e.key, arr); };
     for (const d of approved) for (const e of entries(d, 'revenue')) if (!e.pass) { add(contractByKey, e.key, e.amount); recordWeak(weakContract, e, d); }
+    for (const a of data.scopeAllocations || []) if (a.jobId === x.job.id) {
+      add(contractByKey, a.originalKey, -a.originalValue);
+      for (const c of a.components) add(contractByKey, c.key, c.value);
+    }
+    for (const a of data.scopeAdjustments || []) if (a.job?.id === x.job.id) add(contractByKey, a.key, a.value);
+    for (const d of approved) for (const e of entries(d, 'cost')) if (!e.pass && e.strong) add(approvedCostByKey, e.key, e.amount);
+    for (const s of data.ownerScopes || []) if(s.job.id===x.job.id && !Object.hasOwn(contractByKey,s.key)) {
+      add(contractByKey,s.key,s.value); add(approvedCostByKey,s.key,s.cost);
+    }
     for (const d of x.invoices) {
       const lineTotal = documentLineTotal(d); if (lineTotal != null && Math.abs(lineTotal - documentTotal(d)) > TOL) push(x.job, 'Critical', 'INVOICE_TOTAL_MISMATCH', `${d.fullName}: lines ${money(lineTotal)} do not tie to ${money(documentTotal(d))}.`);
       const applied = dpByDoc[d.id] || 0; if (Math.abs(applied - Number(d.amountPaid || 0)) > TOL) push(x.job, 'Critical', 'INVOICE_PAYMENT_MISMATCH', `${d.fullName}: amountPaid ${money(d.amountPaid)} vs linked payments ${money(applied)}.`);
@@ -411,9 +438,13 @@ export function buildModel(data, start, end) {
     }
     for (const [k, actual] of Object.entries(actualByKey)) {
       const committed = commitByKey[k] || 0;
-      const trusted = ratifiedKeys.has(k) || (billedMeta[k] || []).some(m => m.informal) || actualNotedKeys.has(k);
+      // A direct bill can reconcile to an approved scope budget without a work order.
+      // Compare cumulative cost, not individual draws, and require a shared source ID.
+      const directBudgetMatch = committed <= TOL && (approvedCostByKey[k] || 0) > TOL && actual <= approvedCostByKey[k] + TOL;
+      const trusted = ratifiedKeys.has(k) || (billedMeta[k] || []).some(m => m.informal) || actualNotedKeys.has(k) || directBudgetMatch;
       if (actual > committed + TOL) {
-        if (trusted) push(x.job, 'Info', 'INFORMAL_VENDOR_SCOPE', `${k}: incurred ${money(actual)} without a matching formal work-order line, but is approved per the thread, payment trail, or the line item's own note.`);
+        if (directBudgetMatch) push(x.job, 'Info', 'DIRECT_BILL_WITHIN_APPROVED_BUDGET', `${k}: incurred ${money(actual)} against approved scope cost budget ${money(approvedCostByKey[k])}; no vendor work order was issued.`);
+        else if (trusted) push(x.job, 'Info', 'INFORMAL_VENDOR_SCOPE', `${k}: incurred ${money(actual)} without a matching formal work-order line, but is approved per the thread, payment trail, or the line item's own note.`);
         else push(x.job, 'Review', 'COST_OVER_COMMITMENT', `${k}: incurred ${money(actual)} vs work-order commitment ${money(committed)}.`);
       }
       if (committed <= TOL && !trusted) push(x.job, 'Review', 'UNCOMMITTED_COST', `${k}: incurred ${money(actual)} without a matching valid vendor work order.`);
@@ -426,7 +457,8 @@ export function buildModel(data, start, end) {
     const activeVendorNames = Object.keys(vendorCommitByKey), hasOperationalApproval = !!baseApproval || src.operationallyAuthorized;
     let stage = pendingNew && !hasOperationalApproval ? 'Pending Bid' : 'No Approved Work';
     if (hasOperationalApproval && !x.job.closedOn) {
-      if (!activeVendorNames.length && !ev.started) stage = scheduledAssignment ? 'Assigned / Not Started' : 'Backlog';
+      if (ev.onHold) stage = 'On Hold';
+      else if (!activeVendorNames.length && !ev.started) stage = scheduledAssignment ? 'Assigned / Not Started' : 'Backlog';
       else if (activeVendorNames.length && !ev.started) stage = 'Assigned / Not Started';
       else if (!activeVendorNames.length && ev.started) stage = 'Review';
       else if (ev.started && !ev.done) stage = 'WIP';
@@ -438,7 +470,7 @@ export function buildModel(data, start, end) {
     const customerPaymentDates = (data.documentPayments || []).filter(dp => dp.document?.job?.id === x.job.id && dp.document?.type === 'customerInvoice' && dp.payment?.type === 'credit').map(dp => dp.payment?.paidAt).filter(Boolean);
     if (prepayRx.test(narrative) || x.invoices.some(d => /deposit/i.test(d.fullName || '')) || customerPaymentDates.some(p => ev.firstStart && new Date(p) < new Date(ev.firstStart))) push(x.job, 'Info', 'PREPAYMENT_OR_DEPOSIT', 'Customer funds preceded production; retained as billing/cash activity, never treated as period profit.');
     const profit = billedProduction - actualProductionCost - feeCost - customerRefundCost, margin = billedProduction ? 100 * profit / billedProduction : 0;
-    const open = ['Backlog', 'Assigned / Not Started', 'WIP', 'Ready to Bill', 'Review'].includes(stage);
+    const open = ['Backlog', 'Assigned / Not Started', 'WIP', 'Ready to Bill', 'On Hold', 'Review'].includes(stage);
     const hasCritical = exceptions.some(e => e.job === x.job.name && e.severity === 'Critical');
     const commitmentGap = Math.max(0, sum(Object.values(commitByKey)) - actualProductionCost);
     const financialReview = exceptions.some(e => e.job === x.job.name && ['Critical','Review'].includes(e.severity));
@@ -457,12 +489,15 @@ export function buildModel(data, start, end) {
   for (const p of payments) {
     const arithmeticGap = Number(p.amount || 0) - Number(p.amountApplied || 0) - Number(p.amountUnapplied || 0);
     if (Math.abs(arithmeticGap) > TOL) push({ name: p.account?.name || 'Cash ledger' }, 'Critical', 'PAYMENT_ARITHMETIC', `${localDate(p.paidAt) || '—'} ${money(p.amount)} does not equal applied + unapplied.`);
-    const correction = findCorrection(p, payments), cashClass = cashInClass(p);
+    const correction = findCorrection(p, payments, data.documentPayments), cashClass = cashInClass(p);
     if (isBadMisroute(p)) push({ name: p.account?.name || 'Cash ledger' }, correction ? 'Info' : 'Critical', correction ? 'RESOLVED_CASH_MISROUTE' : 'CASH_MISROUTE', `${localDate(p.paidAt) || '—'} ${money(p.amount)} was routed away from TenanTurn${correction ? ` and corrected on ${localDate(correction.paidAt)}` : ''}.`);
     else if (isReturnedEvent(p)) push({ name: p.account?.name || 'Cash ledger' }, correction ? 'Info' : 'Review', correction ? 'RESOLVED_RETURNED_PAYMENT' : 'RETURNED_PAYMENT', `${localDate(p.paidAt) || '—'} ${money(p.amount)} returned/reversed${correction ? ` and was successfully replaced on ${localDate(correction.paidAt)}` : ''}.`);
     else if (p.type === 'credit' && cashClass === 'directed') push({ name: p.account?.name || 'Cash ledger' }, 'Info', 'CASH_ON_WAY', `${localDate(p.paidAt) || '—'} ${money(p.amount)} is supported as AppFolio/instant-payment money on the way, but not independently bank-settled.`);
     else if (p.type === 'credit' && cashClass === 'unverified') push({ name: p.account?.name || 'Cash ledger' }, 'Review', 'CASH_DESTINATION_UNVERIFIED', `${localDate(p.paidAt) || '—'} credit ${money(p.amount)} has insufficient evidence it reached or is headed to TenanTurn.`);
-    if (Number(p.amountUnapplied || 0) > TOL && !isCorrectiveDeposit(p) && !isReturnedEvent(p) && !correction) push({ name: p.account?.name || 'Cash ledger' }, 'Review', 'UNAPPLIED_CASH', `${localDate(p.paidAt) || '—'} ${money(p.amountUnapplied)} remains unapplied.`);
+    if (Number(p.amountUnapplied || 0) > TOL && !isCorrectiveDeposit(p) && !isReturnedEvent(p) && !correction) {
+      const customerCredit=p.type==='credit'&&p.account?.type==='customer'&&cashClass==='confirmed'&&Math.abs(Number(p.amount)-Number(p.amountApplied)-Number(p.amountUnapplied))<=TOL;
+      push({ name: p.account?.name || 'Cash ledger' }, customerCredit?'Info':'Review', customerCredit?'HELD_CUSTOMER_CREDIT':'UNAPPLIED_CASH', `${localDate(p.paidAt) || '—'} ${money(p.amountUnapplied)} ${customerCredit?'is a recorded customer credit held unapplied; excluded from sales and profit.':'remains unapplied.'}`);
+    }
   }
 
   const fingerprint = new Map();
@@ -485,7 +520,7 @@ export function buildModel(data, start, end) {
   const verifiedCashIn = confirmedCashIn;
   const verifiedCashOut = sum(periodPayments.filter(isVerifiedCashOut), p => p.amount);
   const withheldFees = sum(periodPayments.filter(isWithheldFeePayment), p => p.amount);
-  const arDocs = invoices.filter(d => Number(d.balance || 0) > TOL), apDocs = vendorBills.filter(d => Number(d.balance || 0) > TOL), current = jobs.filter(j => ['Backlog', 'Assigned / Not Started', 'WIP', 'Ready to Bill', 'Review'].includes(j.stage));
+  const arDocs = invoices.filter(d => Number(d.balance || 0) > TOL), apDocs = vendorBills.filter(d => Number(d.balance || 0) > TOL), current = jobs.filter(j => ['Backlog', 'Assigned / Not Started', 'WIP', 'Ready to Bill', 'On Hold', 'Review'].includes(j.stage));
   const reconciledJobsForVendor = jobs.filter(j => j.economicsStatus === 'Reconciled');
   const vendorCapacityModel = buildVendorCapacity(jobs, end || ymd(new Date())), vendorRows = {};
   for (const j of jobs) for (const vn of new Set([...Object.keys(j.vendorActualByKey || {}), ...Object.keys(j.remainingCommitByVendor || {})])) {
@@ -498,12 +533,16 @@ export function buildModel(data, start, end) {
   const pms = Object.values(pmap).map(p => ({ ...p, margin: p.lifetimeBilled ? 100 * p.reconciledGP / p.lifetimeBilled : 0 })).sort((a, b) => b.approved - a.approved);
   const critical = exceptions.filter(e => e.severity === 'Critical'), review = exceptions.filter(e => e.severity === 'Review'), housekeeping = exceptions.filter(e => e.severity === 'Housekeeping'), info = exceptions.filter(e => e.severity === 'Info');
   const reconciledJobs = jobs.filter(j => j.economicsStatus === 'Reconciled'), reconciledGP = sum(reconciledJobs, j => j.profit), provisionalGP = sum(jobs.filter(j => j.economicsStatus === 'Provisional'), j => j.profit);
-  const customerPaymentsApplied = sum((data.documentPayments || []).filter(dp => dp.document?.type === 'customerInvoice' && dp.payment?.type === 'credit' && inRange(dp.payment?.paidAt, start, end) && !isReturnedEvent(dp.payment)), dp => dp.amount);
+  const heldCreditRows=payments.filter(p=>p.account?.type==='customer'&&isVerifiedCashIn(p)&&!isReturnedEvent(p)&&Number(p.amountUnapplied||0)>TOL);
+  const appliedPaymentRows=(data.documentPayments || []).filter(dp => dp.document?.type === 'customerInvoice' && dp.payment?.type === 'credit' && inRange(dp.payment?.paidAt, start, end) && !isReturnedEvent(dp.payment));
+  const heldCustomerCredits = sum(heldCreditRows,p=>p.amountUnapplied);
+  const customerPaymentsApplied = sum(appliedPaymentRows, dp => dp.amount);
   const refunds = jobs.flatMap(j => (j.refundEvents || []).map(r => ({ job: j.job.name, ...r })));
   const severityRank = { Critical: 0, Review: 1, Housekeeping: 2, Info: 3 };
-  const result = { jobs, exceptions: exceptions.sort((a, b) => (severityRank[a.severity] ?? 4) - (severityRank[b.severity] ?? 4)), trust: critical.length ? 'BLOCKED' : review.length ? 'REVIEW' : 'RECONCILED', critical, review, housekeeping, info, criticalCount: critical.length, reviewCount: review.length, housekeepingCount: housekeeping.length, infoCount: info.length, sales: { wins, losses, pendingNew, approvedChanges, pendingChanges, winRate, salesWon }, finance: { periodBilled, periodPass, verifiedCashIn, confirmedCashIn, cashDirected, verifiedCashOut, withheldFees, ar: sum(arDocs, d => d.balance), ap: sum(apDocs, d => d.balance), refunds }, ops: { current }, people: { vendors, vendorCapacityModel, pms }, wins, losses, pendingNew, approvedChanges, pendingChanges, winRate, salesWon, periodBilled, periodPass, verifiedCashIn, confirmedCashIn, cashDirected, verifiedCashOut, withheldFees, customerPaymentsApplied, netVerifiedCash: confirmedCashIn - verifiedCashOut, arDocs, apDocs, current, vendors, pms, refunds, reconciledJobs, reconciledGP, provisionalGP, outcomeReviews: jobs.filter(j => j.outcomeReview) };
+  const result = { jobs, exceptions: exceptions.sort((a, b) => (severityRank[a.severity] ?? 4) - (severityRank[b.severity] ?? 4)), trust: critical.length ? 'BLOCKED' : review.length ? 'REVIEW' : 'RECONCILED', critical, review, housekeeping, info, criticalCount: critical.length, reviewCount: review.length, housekeepingCount: housekeeping.length, infoCount: info.length, sales: { wins, losses, pendingNew, approvedChanges, pendingChanges, winRate, salesWon }, finance: { periodBilled, periodPass, verifiedCashIn, confirmedCashIn, cashDirected, verifiedCashOut, withheldFees, ar: sum(arDocs, d => d.balance), ap: sum(apDocs, d => d.balance), refunds }, ops: { current }, people: { vendors, vendorCapacityModel, pms }, wins, losses, pendingNew, approvedChanges, pendingChanges, winRate, salesWon, periodBilled, periodPass, verifiedCashIn, confirmedCashIn, cashDirected, verifiedCashOut, withheldFees, customerPaymentsApplied, heldCustomerCredits, netVerifiedCash: confirmedCashIn - verifiedCashOut, arDocs, apDocs, current, vendors, pms, refunds, reconciledJobs, reconciledGP, provisionalGP, outcomeReviews: jobs.filter(j => j.outcomeReview) };
   result.audit = { critical: critical.length, review: review.length, housekeeping: housekeeping.length, info: info.length };
   result.cash = { in: confirmedCashIn, directed: cashDirected, out: verifiedCashOut, withheldFees };
+  result.heldCreditRows=heldCreditRows; result.appliedPaymentRows=appliedPaymentRows;
   return result;
 }
 export const buildForensicModel = buildModel;

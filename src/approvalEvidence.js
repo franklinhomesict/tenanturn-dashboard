@@ -2,6 +2,7 @@
 // against the live invoice line and its source evidence on every refresh.
 // Future changes in amount, source, or status invalidate the decision.
 export const approvalEvidence = [
+ {itemId:'22PcHe62JFHM',amount:340,date:'2026-08-25',basis:'Customer payment ratification',paymentId:'22PdM3g9Wby2'},
  {itemId:'22PeEMyttuK6',amount:320,date:'2026-09-02',basis:'Dated approval on line'},
  {itemId:'22Pds22G2gek',amount:2250,date:'2026-09-02',basis:'Dated approval on line'},
  {itemId:'22PeL3yjHvhJ',amount:375,date:'2026-09-16',basis:'Customer payment ratification',paymentId:'22PedjbZHNQf'},
