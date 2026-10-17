@@ -177,13 +177,24 @@ function isWholeDoneText(text) {
   return explicitWhole;
 }
 function activityBelongsToJob(job, text) {
-  const t = String(text || '');
+  // A photo's status label describes metadata, not production. Remove only that
+  // phrase so a separate statement about actual work still counts as evidence.
+  const t = String(text || '').replace(/\b(?:photos?|pictures?|pics)\b[^.!?\n]{0,160}\b(?:label(?:ed|led)?|tag(?:ged)?|revert(?:ed)?|status)\b[^.!?\n]{0,100}\bin progress\b/gi,
+    match => match.replace(/\bin progress\b/gi, 'photo status'));
   if (!activeRx.test(t)) return false;
   if (/\b(?:print|post|upload|attach|link|job sheet|work order)\b[^.\n]{0,50}\b(?:on site|onsite|delivered)\b/i.test(t)) return false;
   const current = cleanName(String(job?.name || '').split(' - ')[0]);
   const refs = [...t.matchAll(/\b(?:finishing|working|starting|started|wrapping up|on site|onsite)\b[^.\n]{0,80}\b(?:at|on)\s+(\d{2,5}\s+[A-Za-z][A-Za-z0-9 .'-]{1,40})/ig)].map(m => cleanName(m[1]));
   if (refs.length && current && refs.every(r => r && !r.includes(current) && !current.includes(r))) return false;
   return true;
+}
+function isAfterJobClose(at, closedOn) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(closedOn))) {
+    // JobTread supplies a calendar date, not a midnight closure timestamp.
+    const date = localDate(at);
+    return !!date && date > closedOn;
+  }
+  return new Date(at) > new Date(closedOn);
 }
 function operationalEvidence(job, comments, logs) {
   const ops = [];
@@ -358,11 +369,11 @@ export function buildModel(data, start, end) {
     if (vendorBillAnyPaid) ev.started = true; // Payment proves recorded activity, never whole-job completion.
     if ((approved.length||x.invoices.length||x.vendorBills.length||x.vendorOrders.length) && /316/i.test(x.job.location?.account?.name || '') && src.pm === 'Unattributed') push(x.job, x.job.closedOn ? 'Info' : 'Review', 'PM_UNATTRIBUTED', '316 job has no defensible current PM attribution.');
 
-    if (x.job.closedOn && ev.latest && new Date(ev.latest.at) > new Date(x.job.closedOn) && ev.latest.type === 'active') {
-      const afterCloseText = x.comments.filter(c => new Date(c.createdAt) > new Date(x.job.closedOn)).map(c => c.message || '').join(' ');
+    if (x.job.closedOn && ev.latest && isAfterJobClose(ev.latest.at, x.job.closedOn) && ev.latest.type === 'active') {
+      const afterCloseText = x.comments.filter(c => isAfterJobClose(c.createdAt, x.job.closedOn)).map(c => c.message || '').join(' ');
       if (postCloseNewScopeRx.test(afterCloseText)) {
         const address = cleanName(String(x.job.name || '').split(' - ')[0]);
-        const followOn = (data.jobs || []).find(j => j.id !== x.job.id && cleanName(String(j.name || '').split(' - ')[0]) === address && (!j.createdAt || new Date(j.createdAt) > new Date(x.job.closedOn)));
+        const followOn = (data.jobs || []).find(j => j.id !== x.job.id && cleanName(String(j.name || '').split(' - ')[0]) === address && (!j.createdAt || isAfterJobClose(j.createdAt, x.job.closedOn)));
         if (followOn) push(x.job, 'Info', 'FOLLOW_ON_SCOPE_SEPARATED', `Later scope was captured separately as ${followOn.name}; original closed-job economics remain isolated.`);
         else push(x.job, 'Review', 'POST_CLOSE_NEW_SCOPE', 'New work was requested after the original job closed; keep it out of the closed economics and open a new scope/job if pursued.');
       } else push(x.job, 'Critical', 'ACTIVE_AFTER_JOB_CLOSED', 'Production evidence exists after the JobTread close date.');

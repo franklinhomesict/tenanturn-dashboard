@@ -19,3 +19,26 @@ assert.equal(row.stage,'Review');
 assert.ok(model.review.some(e=>e.job===job.name&&e.code==='OPERATIONAL_STAGE_REVIEW'));
 assert.equal(model.trust,'REVIEW');
 console.log('Operational trust self-test: 1 scenario passed.');
+// Photo-label discussions must not manufacture production after completion.
+const closedModel=(message,at='2026-09-04T17:00:00Z',closedOn='2026-09-03')=>{
+ const closedJob={...job,closedOn};
+ return buildForensicModel({...data,jobs:[closedJob],comments:[
+  {...comment,id:'done',createdAt:'2026-09-02T18:00:00Z',message:'Job is complete.'},
+  {...comment,id:'later',createdAt:at,message}
+ ]},'2026-09-01','2026-09-30');
+};
+const hasClosedActivity=m=>m.critical.some(e=>e.code==='ACTIVE_AFTER_JOB_CLOSED');
+assert.equal(hasClosedActivity(closedModel('The photos were labeled completion but reverted to in progress.')),false);
+assert.equal(closedModel('The pictures status is in progress.').jobs[0].ev.done,true);
+// A metadata discussion cannot hide a separate production statement.
+assert.equal(hasClosedActivity(closedModel('The photos reverted to in progress. Crew working today.')),true);
+assert.equal(hasClosedActivity(closedModel('Crew working today.')),true);
+// A date-only close covers the entire Chicago calendar day, including after UTC midnight.
+assert.equal(hasClosedActivity(closedModel('Crew working today.','2026-09-04T04:59:59Z')),false);
+assert.equal(hasClosedActivity(closedModel('Crew working today.','2026-09-04T05:00:00Z')),true);
+// Winter uses Chicago standard time; exact timestamps still retain their precision.
+assert.equal(hasClosedActivity(closedModel('Crew working today.','2026-12-04T05:59:59Z','2026-12-03')),false);
+assert.equal(hasClosedActivity(closedModel('Crew working today.','2026-12-04T06:00:00Z','2026-12-03')),true);
+assert.equal(hasClosedActivity(closedModel('Crew working today.','2026-09-03T17:00:01Z','2026-09-03T17:00:00Z')),true);
+assert.equal(hasClosedActivity(closedModel('Crew working today.','2026-09-03T16:59:59Z','2026-09-03T17:00:00Z')),false);
+console.log('Photo status and closure boundaries: 10 regression checks passed.');
