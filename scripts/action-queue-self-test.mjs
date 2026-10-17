@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import {buildActionQueue} from '../src/actionQueue.js';
+const job={id:'j1',name:'Example Job'},other={id:'j2',name:'Other Job'};
+const item=(name,price,cost)=>({name,priceWithTax:price,cost});
+const doc=(status,items,overrides={})=>({id:'d1',fullName:'Proposal',type:'customerOrder',job,status,costItems:{nodes:items},...overrides});
+const model=(docs=[],exceptions=[])=>({jobs:[{job},{job:other}],data:{docs},exceptions});
+const problem=(code,severity='Review',name=job.name)=>({job:name,code,severity,detail:'Source evidence'});
+const priced=buildActionQueue(model([doc('pending',[item('Labor',1600,800),item('Discount',-800,0)])]));
+assert.equal(priced[0].pricing[0].profit,0);
+assert.equal(priced[0].pricing[0].status,'pending');
+assert.equal(buildActionQueue(model([doc('draft',[item('Labor',800,800)])])).length,0);
+assert.equal(buildActionQueue(model([doc('denied',[item('Labor',800,800)])])).length,0);
+assert.equal(buildActionQueue(model([doc('pending',[item('Labor',1200,800)])])).length,0);
+// At-cost reimbursements do not manufacture a zero-margin production advisory.
+assert.equal(buildActionQueue(model([doc('pending',[item('Reimbursement - supplies',100,100)])])).length,0);
+const grouped=buildActionQueue(model([], [problem('INVOICE_SCOPE_NEEDS_APPROVAL'),problem('PAID_SCOPE_RATIFIED'),problem('PM_UNATTRIBUTED')]));
+assert.equal(grouped.length,1);assert.equal(grouped[0].issues.length,3);assert.equal(grouped[0].priority,1);
+const ranked=buildActionQueue(model([],[problem('PM_UNATTRIBUTED'),problem('INVOICE_TOTAL_MISMATCH','Critical',other.name)]));
+assert.equal(ranked[0].job.id,other.id);assert.equal(ranked[0].critical,true);
+const original=model([doc('approved',[item('Labor',700,800)])],[problem('COST_OVER_COMMITMENT')]);const snapshot=JSON.stringify(original);
+buildActionQueue(original);assert.equal(JSON.stringify(original),snapshot);
+assert.equal(buildActionQueue(model([],[problem('INFORMATION','Info')])).length,0);
+assert.equal(buildActionQueue(model([],[problem('PASS_THROUGH_IMBALANCE','Owner reviewed')]))[0].priority,5);
+console.log('Action queue: discount pricing, reimbursement exclusions, status gates, grouping, critical priority and immutable source checks passed.');

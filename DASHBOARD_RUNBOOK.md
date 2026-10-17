@@ -23,6 +23,15 @@ This section supersedes the older static-refresh instructions below.
 - Run `npm run build`. Reconcile the actual source fixture outside the public repository, including sales table sum, pending/draft/denied treatment, and MR + CS invariants. Never commit customer records, grant keys, or the private audit fixture.
 - Verify a READY Vercel production deployment and the production API plus browser cards. A successful frontend build alone is not verification. Preview currently lacks the production JobTread credential and correctly reports a source error.
 
+## Owner action view — October 16, 2026
+
+- `src/ActionCenter.jsx` presents the company-wide action queue and a job evidence inspector. It reads the shared ledger; it never writes to JobTread or changes sales recognition.
+- `src/actionQueue.js` groups every Critical, Review and Owner reviewed exception by job/account, prioritizes financial checks, and adds advisory flags for pending/approved production proposals priced at or below production cost. Discounts count; at-cost reimbursements do not. These advisories do not alter reconciliation status.
+- Action counts are groups, while confidence counts remain individual ledger checks. Full audit evidence remains available under the audit trail with explicit filters. Do not sum overlapping source amounts as a risk total.
+- The action queue and inspector are explicitly company-wide and independent of the sales period. Section cards retain the selected business line. Billing and sales are period figures; closed-job profit is lifetime. Bank balance and safe owner draw remain unavailable.
+- The job inspector shows loaded documents, scope lines, job messages and daily-log text. It does not claim to inspect file contents, photos or external Drive folders.
+- `scripts/action-queue-self-test.mjs` is part of the build checks. Do not commit source fixtures or private customer records.
+
 ## Purpose
 This file is the handoff for future ChatGPT sessions. Read this **before refreshing or changing dashboard data** so the operating logic does not have to be reconstructed.
 
