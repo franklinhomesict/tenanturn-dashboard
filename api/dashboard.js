@@ -1,4 +1,5 @@
 import {auditedLedger} from '../src/auditedLedger.js';
+import {attachCostItems} from '../src/documentLines.js';
 import { buildForensicModel, normalize } from '../src/forensicModel.js';
 import { manualOperationalOverrides, manualOverrideComment } from '../src/manualOverrides.js';
 
@@ -131,35 +132,6 @@ const documentPaymentConnection = page => ({
   nextPage: {}
 });
 
-function attachCostItems(documents, costItems) {
-  const byDocument = {};
-  for (const item of costItems.nodes || []) {
-    const documentId = item.document?.id;
-    if (!documentId) continue;
-    if (item.document?.type === 'customerOrder' && item.document?.status === 'approved' && item.isSelected === false) continue;
-    (byDocument[documentId] ||= []).push({
-      id: item.id,
-      name: item.name,
-      description: item.description,
-      cost: item.cost,
-      price: item.price,
-      priceWithTax: item.priceWithTax,
-      quantity: item.quantity,
-      unitCost: item.unitCost,
-      unitPrice: item.unitPrice,
-      isSelected: item.isSelected,
-      jobCostItem: item.jobCostItem,
-      sourceCostItem: item.sourceCostItem
-    });
-  }
-  return {
-    nodes: (documents.nodes || []).map(doc => ({
-      ...doc,
-      costItems: { nodes: byDocument[doc.id] || [] }
-    })),
-    nextPage: null
-  };
-}
 
 async function approvalHistories(grantKey,documents){
   for(let offset=0;offset<documents.length;offset+=4){
@@ -233,7 +205,7 @@ function enrichOperationalEvidence(jobs, comments) {
 
 function compactAudit(apiResponse,start,end){
  const m=auditedLedger(apiResponse,start,end);
- return {version:'2026.09.30',period:{start,end,timeZone:'America/Chicago'},trust:m.trust,criticalCount:m.critical,reviewCount:m.review,sales:{total:m.sales,formalOrderCount:m.formalCount,entries:m.salesEntries.map(s=>({id:s.id,job:s.job,date:s.date,value:s.value,basis:s.basis,kind:s.kind}))},finance:{issuedProduction:m.billed,receivable:m.ar,payable:m.ap,projectedOpenJobProfit:m.projectedProfit,closedRecordedJobProfit:m.closedProfit,checkedClosedJobProfit:m.checkedProfit,customerPaymentsApplied:m.customerPaymentsApplied,futureCostBudget:m.futureCost},jobs:m.jobs.map(j=>({job:j.job,stage:j.stage,status:j.status,approved:j.approved,billed:j.billed,cost:j.cost,recordedProfit:j.profitRecorded,projectedProfit:j.projectedProfit,reviews:j.reviews})),exceptions:m.exceptions};
+ return {version:'2026.10.22',period:{start,end,timeZone:'America/Chicago'},trust:m.trust,criticalCount:m.critical,reviewCount:m.review,sales:{total:m.sales,formalOrderCount:m.formalCount,entries:m.salesEntries.map(s=>({id:s.id,job:s.job,date:s.date,value:s.value,basis:s.basis,kind:s.kind}))},finance:{issuedProduction:m.billed,receivable:m.ar,payable:m.ap,projectedOpenJobProfit:m.projectedProfit,closedRecordedJobProfit:m.closedProfit,checkedClosedJobProfit:m.checkedProfit,customerPaymentsApplied:m.customerPaymentsApplied,futureCostBudget:m.futureCost},jobs:m.jobs.map(j=>({job:j.job,stage:j.stage,status:j.status,approved:j.approved,billed:j.billed,cost:j.cost,recordedProfit:j.profitRecorded,projectedProfit:j.projectedProfit,reviews:j.reviews})),exceptions:m.exceptions};
 }
 
 export default async function handler(req, res) {

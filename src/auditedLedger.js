@@ -1,8 +1,10 @@
-import {buildForensicModel,normalize,inRange,eventBusinessDate,sum,ymd,sourceIdentity} from './forensicModel.js';
+import {buildForensicModel,normalize,inRange,eventBusinessDate,sum,ymd,sourceIdentity,validBusinessDate} from './forensicModel.js';
 import {approvalEvidence} from './approvalEvidence.js';
 import {evidenceFingerprints,digest} from './evidenceFingerprints.js';
 import {classifyBusinessLine,isPassThroughItem,isFeeItem} from './businessLineRules.js';
 import {reconcileAuditedScopes} from './scopeReconciliation.js';
+import {paymentRatifications} from './paymentRatifications.js';
+import {orderPriceRevisions} from './documentLines.js';
 import {verifiedPriceAdjustments} from './priceAdjustmentEvidence.js';
 import {verifiedOwnerScopes,applyOwnerReviewedExceptions} from './ownerEvidence.js';
 
@@ -17,7 +19,11 @@ export const production=(d,line='Overall',kind='revenue')=>total(d.costItems?.no
 const date=d=>d&&ymd(new Date(d));
 
 export function auditedLedger(api,start,end,line='Overall',{ownerRules,reviewRules}={}){
- const source=normalize(api);
+ const normalized=normalize(api);
+ // Carry an explicit at-cost invoice classification across the exact same job
+ // and strong scope ID. Vendor descriptions need not repeat the billing policy.
+ const passKeys=new Set(normalized.docs.filter(d=>d.type==='customerInvoice'&&valid(d)).flatMap(d=>(d.costItems?.nodes||[]).filter(isPassThroughItem).filter(i=>i.jobCostItem?.id||i.sourceCostItem?.id).map(i=>`${d.job?.id}|${key(i)}`)));
+ const source={...normalized,docs:normalized.docs.map(d=>({...d,costItems:{nodes:(d.costItems?.nodes||[]).map(i=>passKeys.has(`${d.job?.id}|${key(i)}`)?{...i,auditPassThrough:true}:i)}}))};
  // Apply only when the relevant historical job is present in this source set.
  const reconciliation=source.jobs.length?reconcileAuditedScopes(source):{data:source,issues:[],applied:[]};
  const data=reconciliation.data;
@@ -31,7 +37,7 @@ export function auditedLedger(api,start,end,line='Overall',{ownerRules,reviewRul
  const ownerEvidence=verifiedOwnerScopes(data,sourceIdentity,ownerRules);
  data.ownerScopes=ownerEvidence.scopes;
  const core=buildForensicModel(data,start,end),exceptions=applyOwnerReviewedExceptions([...core.exceptions,...reconciliation.issues,...reconciliation.applied,...priceChanges.issues,...ownerEvidence.issues],data,reviewRules);
- const flag=(job,code,detail,severity='Review')=>exceptions.push({job:job?.name||'Source',code,detail,severity});
+ const flag=(job,code,detail,severity='Review',extra={})=>exceptions.push({job:job?.name||'Source',jobId:job?.id,code,detail,severity,...extra});
  const docs=data.docs,byId=new Map(docs.map(d=>[d.id,d])),comments=new Map(data.comments.map(c=>[c.id,c]));
  if(!api?.ok||api.organizationId!=='22Pa5G229Dc7'||!api.sourceCoverage?.complete)flag(null,'SOURCE_NOT_VERIFIED','The complete live JobTread source has not passed the feed checks.','Critical');
  for(const [name,rows] of Object.entries({jobs:data.jobs,documents:docs,comments:data.comments,payments:data.payments,documentPayments:data.documentPayments})){
@@ -44,14 +50,15 @@ export function auditedLedger(api,start,end,line='Overall',{ownerRules,reviewRul
  for(const d of docs.filter(d=>valid(d)&&!(d.type==='customerOrder'&&d.status==='pending'))){
   const items=d.costItems?.nodes||[],value=d.type.startsWith('customer')?d.priceWithTax:d.cost;
   const itemTotal=total(items,i=>d.type.startsWith('customer')?i.priceWithTax??i.price:i.cost);
-  if(!items.length&&cents(value)!==0)flag(d.job,'MISSING_DOCUMENT_LINES',`${d.fullName} has value but no source lines.`,'Critical');
-  if(Math.abs(cents(itemTotal)-cents(value))>2)flag(d.job,'DOCUMENT_LINE_MISMATCH',`${d.fullName}: line total ${itemTotal.toFixed(2)} differs from document ${Number(value).toFixed(2)}.`,'Critical');
+  if(!items.length&&cents(value)!==0)flag(d.job,'MISSING_DOCUMENT_LINES',`${d.fullName} has value but no source lines.`,'Critical',{documentId:d.id,documentType:d.type});
+  if(Math.abs(cents(itemTotal)-cents(value))>2)flag(d.job,'DOCUMENT_LINE_MISMATCH',`${d.fullName}: line total ${itemTotal.toFixed(2)} differs from document ${Number(value).toFixed(2)}.`,'Critical',{documentId:d.id,documentType:d.type});
   for(const i of items)if(!isPassThroughItem(i)&&!isFeeItem(i)&&classify(i,`${d.job?.name||''} ${d.fullName||''}`)==='REVIEW'&&Math.abs(cents(i.priceWithTax??i.price))>2)flag(d.job,'BUSINESS_LINE_UNRESOLVED',`${d.fullName}: ${i.name} needs a Make Ready / Contractor Services classification.`);
  }
  const orders=docs.filter(d=>d.type==='customerOrder'&&d.status==='approved');
  const contractKeys=new Set(orders.flatMap(d=>(d.costItems?.nodes||[]).map(i=>`${d.job?.id}|${key(i)}`)));
  for(const a of priceChanges.allocations)for(const c of a.components)contractKeys.add(`${a.jobId}|${c.key}`);
  const salesEntries=[];
+ const revisions=new Map(orders.map(d=>[d.id,orderPriceRevisions(d)]));
  // A later formal order for this same scope retains the original approval date.
  const ownerByKey=new Map(ownerEvidence.scopes.map(s=>[`${s.job.id}|${s.key}`,s]));
  for(const s of ownerEvidence.scopes)salesEntries.push({...s,date:ymd(new Date(s.approvedAt)),value:line==='Overall'||classify(s.item,s.job.name)===line?s.value:0});
@@ -61,15 +68,21 @@ export function auditedLedger(api,start,end,line='Overall',{ownerRules,reviewRul
   else {
    const repeated=(d.costItems?.nodes||[]).filter(i=>ownerByKey.has(`${d.job?.id}|${key(i)}`));
    for(const i of repeated)if(cents(i.priceWithTax??i.price)!==cents(ownerByKey.get(`${d.job.id}|${key(i)}`).value))flag(d.job,'OWNER_SCOPE_FORMALIZATION_CHANGED','A later order differs from the original owner-approved scope; reconcile the change before counting sales.','Critical');
-   const remaining={...d,costItems:{nodes:(d.costItems?.nodes||[]).filter(i=>!ownerByKey.has(`${d.job?.id}|${key(i)}`))}};
+   const saleDocument=revisions.get(d.id)?.original||d;
+   const remaining={...saleDocument,costItems:{nodes:(saleDocument.costItems?.nodes||[]).filter(i=>!ownerByKey.has(`${d.job?.id}|${key(i)}`))}};
    salesEntries.push({id:d.id,doc:d,job:d.job,date:eventBusinessDate(d),value:production(remaining,line),basis:'Approved customer order',kind:/change order/i.test(d.fullName)?'Change order':'Proposal'});
+  }
+  for(const revision of revisions.get(d.id)?.matches||[]){
+   const {item,event}=revision;
+   salesEntries.push({id:`price-event:${d.id}:${event.createdAt}`,doc:d,item,job:d.job,key:key(item),date:ymd(new Date(event.createdAt)),value:line==='Overall'||classify(item,`${d.job?.name||''} ${d.fullName||''}`)===line?revision.value:0,basis:'Dated JobTread price revision matched exactly to discount line',kind:'Price adjustment'});
   }
   if(d.approvalHistory?.nextPage)flag(d.job,'APPROVAL_HISTORY_INCOMPLETE',`${d.fullName}: approval history is incomplete.`,'Critical');
   if(!d.approvalHistory)flag(d.job,'APPROVAL_HISTORY_MISSING',`${d.fullName}: approval history was not loaded.`,'Critical');
   else{
    const approvals=d.approvalHistory.nodes.filter(e=>e.nextStatus==='approved');
    if(!approvals.some(e=>Math.abs(new Date(e.createdAt)-new Date(d.closedAt))<300000))flag(d.job,'APPROVAL_TIMESTAMP_CONFLICT',`${d.fullName}: current approval timestamp does not match its event history.`,'Critical');
-   if(d.approvalHistory.nodes.some(e=>e.nextPrice!=null&&e.previousPrice!=null&&e.nextPrice!==e.previousPrice&&new Date(e.createdAt)-new Date(d.closedAt)>300000))flag(d.job,'POST_APPROVAL_PRICE_REVISION',`${d.fullName}: price changed after approval; its period sales amount requires review.`);
+   if(revisions.get(d.id))flag(d.job,'DOCUMENTED_PRICE_REVISION',`${d.fullName}: dated price change reconciles exactly to the recorded discount; original approval and reduction are recognized once on their respective dates.`,'Info');
+   else if(d.approvalHistory.nodes.some(e=>e.nextPrice!=null&&e.previousPrice!=null&&e.nextPrice!==e.previousPrice&&new Date(e.createdAt)-new Date(d.closedAt)>300000))flag(d.job,'POST_APPROVAL_PRICE_REVISION',`${d.fullName}: price changed after approval; its period sales amount requires review.`);
   }
  }
  const supportedItems=new Set();
@@ -107,15 +120,24 @@ export function auditedLedger(api,start,end,line='Overall',{ownerRules,reviewRul
   if(!match)continue;
   const year=match[3]?(match[3].length===2?'20'+match[3]:match[3]):String(d.createdAt||'').slice(0,4);
   const approvedDate=`${year}-${match[1].padStart(2,'0')}-${match[2].padStart(2,'0')}`;
-  if(!/^\d{4}-\d{2}-\d{2}$/.test(approvedDate)||Number(match[1])>12||Number(match[2])>31||approvedDate>ymd(new Date())){flag(d.job,'ITEM_APPROVAL_DATE_INVALID',`${d.fullName}: invalid approval date on ${item.name}.`);continue;}
+  if(!validBusinessDate(approvedDate)||approvedDate>ymd(new Date())){flag(d.job,'ITEM_APPROVAL_DATE_INVALID',`${d.fullName}: invalid approval date on ${item.name}.`);continue;}
   const scopeKey=`${d.job?.id}|${key(item)}`;
   if(automaticScopeKeys.has(scopeKey)){flag(d.job,'REPEATED_INVOICE_ONLY_SCOPE',`${item.name}: repeated invoice-only approved scope requires deduplication review.`);continue;}
   automaticScopeKeys.add(scopeKey);supportedItems.add(item.id);
   const value=line==='Overall'||classify(item,`${d.job?.name} ${d.fullName}`)===line?Number(item.priceWithTax??item.price):0;
   salesEntries.push({id:item.id,doc:d,item,job:d.job,date:approvedDate,value,basis:'Explicit dated approval on added scope line',kind:'Additional scope'});
  }
- // New invoice-only scope is never silently converted into sales by invoice date,
- // a paid flag, or a generic "approved" elsewhere in the thread.
+ // Fully paid, exactly allocated customer cash can establish acceptance on its
+ // recorded ratification date. Partial, returned, ambiguous and draft scopes cannot.
+ for(const s of paymentRatifications(data,contractKeys,supportedItems)){
+  supportedItems.add(s.item.id);
+  salesEntries.push({...s,value:line==='Overall'||classify(s.item,`${s.job?.name} ${s.doc.fullName}`)===line?s.value:0});
+  const prior=exceptions.find(e=>e.job===s.job?.name&&e.code==='PAID_SCOPE_RATIFIED'&&e.detail.startsWith(`${s.key}:`));
+  if(prior){prior.originalSeverity=prior.severity;prior.severity='Info';prior.detail+=` Acceptance reconciled to exact customer-payment allocations on ${s.date}; original approval date is not inferred.`;}
+  flag(s.job,'SALES_RATIFIED_BY_PAYMENT',`${s.item.name}: acceptance established by fully allocated customer payment on ${s.date}. ${s.basis}`,'Info');
+ }
+ // Remaining invoice-only scope is never recognized from issue date, a paid flag,
+ // or a generic approval elsewhere in a thread.
  for(const d of docs.filter(d=>d.type==='customerInvoice'&&valid(d)))for(const i of d.costItems?.nodes||[]){
   if(isPassThroughItem(i)||supportedItems.has(i.id)||contractKeys.has(`${d.job?.id}|${key(i)}`)||cents(i.priceWithTax??i.price)===0)continue;
   flag(d.job,'INVOICE_SCOPE_NEEDS_APPROVAL',`${d.fullName}: ${i.name} requires scope/date reconciliation before inclusion in sales.`);
@@ -169,5 +191,5 @@ export function auditedLedger(api,start,end,line='Overall',{ownerRules,reviewRul
  });
  const closed=jobRows.filter(j=>j.job.closedOn&&(j.approved!==0||j.billed!==0||j.cost!==0)),checked=closed.filter(j=>j.status==='Closed / checked');
  const critical=exceptions.filter(e=>e.severity==='Critical'),review=exceptions.filter(e=>e.severity==='Review');
- return {core,data,exceptions,trust:critical.length?'BLOCKED':review.length?'REVIEW':'RECONCILED',critical:critical.length,review:review.length,salesEntries:periodSales,sales:total(periodSales,s=>s.value),grossSales:total(periodSales.filter(s=>s.value>0),s=>s.value),salesAdjustments:total(periodSales.filter(s=>s.value<0),s=>s.value),formalCount:periodSales.filter(s=>s.doc.type==='customerOrder').length,additionalCount:new Set(periodSales.filter(s=>s.kind==='Additional scope').map(s=>s.doc.id)).size,pms:[...pms.values()].map(p=>({...p,sales:p.sales/100})),jobs:jobRows,current,vendors,periodInvoices,billed:total(periodInvoices,d=>production(d,line)),ar:total(arDocs,d=>d.balance),ap:total(apDocs,d=>d.balance),arDocs,apDocs,projectedProfit:total(current,j=>j.projectedProfit),futureCost:total(current,j=>j.remainingBudget),closedProfit:total(closed,j=>j.profitRecorded),checkedProfit:total(checked,j=>j.profitRecorded),checkedJobs:checked.length,closedJobs:closed.length,customerPaymentsApplied:core.customerPaymentsApplied};
+ return {period:{start,end},core,data,exceptions,trust:critical.length?'BLOCKED':review.length?'REVIEW':'RECONCILED',critical:critical.length,review:review.length,salesEntries:periodSales,sales:total(periodSales,s=>s.value),grossSales:total(periodSales.filter(s=>s.value>0),s=>s.value),salesAdjustments:total(periodSales.filter(s=>s.value<0),s=>s.value),formalCount:periodSales.filter(s=>s.doc.type==='customerOrder'&&s.kind!=='Price adjustment').length,additionalCount:new Set(periodSales.filter(s=>s.kind==='Additional scope').map(s=>s.doc.id)).size,pms:[...pms.values()].map(p=>({...p,sales:p.sales/100})),jobs:jobRows,current,vendors,periodInvoices,billed:total(periodInvoices,d=>production(d,line)),ar:total(arDocs,d=>d.balance),ap:total(apDocs,d=>d.balance),arDocs,apDocs,projectedProfit:total(current,j=>j.projectedProfit),futureCost:total(current,j=>j.remainingBudget),closedProfit:total(closed,j=>j.profitRecorded),checkedProfit:total(checked,j=>j.profitRecorded),checkedJobs:checked.length,closedJobs:closed.length,customerPaymentsApplied:core.customerPaymentsApplied};
 }

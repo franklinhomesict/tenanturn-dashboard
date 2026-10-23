@@ -9,7 +9,7 @@ This section supersedes the older static-refresh instructions below.
 - Never edit a cached total or run the old build-time source patch scripts. `npm run build` runs regression checks and builds the actual checked-in source without rewriting it.
 - Sales includes every approved customer order, including additional approved proposals on the same job, by its actual approval timestamp in America/Chicago. Separately evidenced additional scope is included once. Per the owner’s September 30 policy, net sales also include evidenced price increases, reductions and credits in their recognition period; full customer payment can establish acceptance of added scope. Invoice issue dates and progress balances never create a new sale.
 - `approvalEvidence.js` contains individual audited scope decisions with source references. `evidenceFingerprints.js` detects changes to those source facts. These are not monthly totals. Formalized scope is deduplicated against the original decision. Missing or changed evidence is flagged and excluded.
-- Future invoice-only added scopes with explicit dated approval notes are recognized automatically. Other new invoice-only scopes require review rather than guessed approval dates.
+- Future invoice-only scopes with valid dated approval notes are recognized automatically. Fully paid scopes can also be ratified using exact same-customer, complete payment allocations and the final allocation date. Partial, returned, wrong-customer, duplicate-scope and draft records cannot establish acceptance. Other scopes require review; original approval dates are never guessed.
 - Draft and denied invoices and bills are excluded. Pending and approved financial documents are issued ledger activity. Billing uses invoice issue date, not approval/payment date.
 - Production excludes explicitly at-cost pass-through revenue and cost. Recorded job costs include fees. MR and CS share scope classifications; split results must conserve the company totals.
 - Whole-job completion requires actual completion/close evidence. Paying one vendor bill does not prove completion.
@@ -19,7 +19,7 @@ This section supersedes the older static-refresh instructions below.
 - `scopeReconciliation.js` validates original source fingerprints before matching progress/replacement invoice lines to original approved scopes. `priceAdjustmentEvidence.js` validates repricing and combined-scope decomposition. Original document values remain intact.
 - Balanced unapplied customer funds are explicitly shown as held customer credits, excluded from sales and profit. A missing allocation or inconsistent payment balance blocks financial figures.
 - No independent bank feed exists. Never label recorded JobTread cash as bank-confirmed cash.
-- Every successful refresh has a timestamp. Failed or incomplete refreshes retain the prior timestamp and show an error. Data older than five minutes is stale. Financial figures are withheld on a failed refresh or stale source.
+- Every successful refresh has a timestamp. Failed or incomplete refreshes retain the last complete snapshot and timestamp, with an explicit error. Data older than five minutes is labeled a stale snapshot; it is never presented as a new refresh. Initial incomplete sources remain unavailable.
 - Run `npm run build`. Reconcile the actual source fixture outside the public repository, including sales table sum, pending/draft/denied treatment, and MR + CS invariants. Never commit customer records, grant keys, or the private audit fixture.
 - Verify a READY Vercel production deployment and the production API plus browser cards. A successful frontend build alone is not verification. Preview currently lacks the production JobTread credential and correctly reports a source error.
 
@@ -38,9 +38,21 @@ This section supersedes the older static-refresh instructions below.
 - Collections age by invoice issue date, never assumed due date. Unknown dates stay in a separate bucket. All A/R and payments remain explicitly company-wide in MR/CS views.
 - `ownerSignals.js` derives aging, collection priority, revenue-weighted lifetime closed margin, and approved open jobs with nonpositive projected profit. Regression checks run in the normal build.
 - Pipeline buttons filter open job economics; address/customer/PM search and sort use the selected line. Inspect routes into the existing company-wide source inspector.
-- Source errors, stale data, invalid ranges, and critical financial checks still suppress every overview financial value and disable CSV export. The first critical discrepancy is visible above the overview.
+- Initial source failures and invalid ranges suppress figures. A failed refresh retains the last complete snapshot with an explicit warning. Critical discrepancies withhold only affected metrics and job amounts; unrelated KPIs remain available. CSV exports preserve withholding, period and source timestamp. The first critical discrepancy is visible above the overview.
 - CSV exports the eight displayed KPI values and their scope/basis. Bank balance, overhead and owner draw remain unavailable.
 - Navigation and filters are browser-session state. No action is cleared, approved, sent, or retried by this UI.
+
+## Dashboard correctness repairs — October 22, 2026
+
+- `documentLines.js` retains unselected zero-cost discount/credit lines on approved orders only when those lines reconcile the document's price and cost. Unselected optional work stays excluded. Original source IDs, values and selection flags remain intact.
+- Chronological price-history events can be matched exactly to discount lines. The original approval and dated reduction are separate sales events, so a later-month discount does not rewrite the earlier month. Unexplained changes remain review items.
+- `paymentRatifications.js` recognizes customer acceptance from fully allocated, valid customer credit payments, on the final payment date. It checks customer identity, complete allocation arithmetic, repeated scope and returned-payment evidence; paid flags alone do not suffice.
+- At-cost expense rentals explicitly billed without markup are excluded from performance sales and costs; that policy propagates only across the exact same job and scope ID. Amounts and reimbursement mismatches remain in the source ledger.
+- Zero-net charges and negative vendor credits are retained without unauthorized-spend warnings. Genuine positive overruns still generate a review. Identical financial amounts on distinct scopes are not duplicate evidence; matching scope signatures create a review rather than a proven error.
+- `metricHealth.js` scopes critical checks to their dependencies. Order issues affect sales/projections; invoice and vendor-bill issues affect their respective metrics. Source identity/coverage and duplicate record IDs remain global integrity checks. Raw document values stay available for inspection.
+- Approved zero/negative-margin proposals are margin disclosures, not urgent requests to approve again. Pending below-cost proposals remain actionable. Job lists support showing every match beyond the first 25.
+- Refresh calls do not overlap. Timeouts and errors retain the previous complete source snapshot with its original timestamp. Invalid calendar approval dates are rejected.
+- `npm run build` includes the regression and dashboard-repair suites. `node scripts/validate-live-source.mjs <private-snapshot>` checks all loaded job economics, three periods and three business views without committing customer records. Browser visual QA remains unavailable in this execution environment.
 
 ## Purpose
 This file is the handoff for future ChatGPT sessions. Read this **before refreshing or changing dashboard data** so the operating logic does not have to be reconstructed.

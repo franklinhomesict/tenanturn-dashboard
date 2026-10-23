@@ -7,8 +7,10 @@ const turnoverScopeRx=/\b(?:make ready|make-ready|turnover|unit turn|lvp|floorin
 const specialtyScopeRx=/\b(?:tree|roof|roofing|siding|sewer|septic|foundation|gutter|concrete|exterior paint|water heater|plumbing repair|plumbing replacement|hvac|furnace|air conditioner|electrical service|service panel|panel upgrade)\b/i;
 
 export const isPassThroughItem=i=>{
+ if(i?.auditPassThrough)return true;
  const name=`${i?.jobCostItem?.name||''} ${i?.name||''}`;
  if(passRx.test(name))return true;
+ if(/truck rental|equipment rental|dump fee|delivery fee|permit fee/i.test(name)&&/billed at cost|at cost,? no markup/i.test(i?.description||'')&&Number(i?.priceWithTax??i?.price)>0&&Math.abs(Number(i?.priceWithTax??i?.price)-Number(i?.cost))<=.02)return true;
  return /materials?|supplies?|receipts?|paint|hardware/i.test(name) && /at cost|no markup|reimburs|pass[- ]?through/i.test(i?.description||'') && (Math.abs(Number(i?.priceWithTax??i?.price??0)-Number(i?.cost??0))<=.02 || Number(i?.priceWithTax??i?.price??0)===0);
 };
 export const isFeeItem=i=>feeRx.test(`${i?.name||''} ${i?.description||''}`);

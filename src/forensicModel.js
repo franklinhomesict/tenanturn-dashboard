@@ -30,6 +30,11 @@ const localDate = s => {
   return Number.isNaN(d.getTime()) ? null : ymd(d);
 };
 const day = s => s ? new Date(`${String(s).slice(0, 10)}T12:00:00`) : null;
+export const validBusinessDate=value=>{
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(value||''))return false;
+ const parsed=new Date(`${value}T12:00:00Z`);
+ return Number.isFinite(parsed.getTime())&&parsed.toISOString().slice(0,10)===value;
+};
 export const inRange = (s, a, b) => { const d = localDate(s); return !!d && !!a && !!b && day(d) >= day(a) && day(d) <= day(b); };
 export const eventDate = d => d?.closedAt || d?.signedAt || d?.issueDate || d?.createdAt || null;
 export const eventBusinessDate = d => localDate(eventDate(d));
@@ -344,7 +349,7 @@ export function buildModel(data, start, end) {
   // Status badge; they're surfaced separately as Housekeeping so a real $ mismatch never
   // gets buried under routine paperwork noise.
   const HOUSEKEEPING_CODES = new Set([]);
-  const push = (job, severity, code, detail, extra = {}) => exceptions.push({ job: job?.name || 'System', severity: (severity !== 'Info' && HOUSEKEEPING_CODES.has(code)) ? 'Housekeeping' : severity, code, detail, ...extra });
+  const push = (job, severity, code, detail, extra = {}) => exceptions.push({ job: job?.name || 'System', jobId:job?.id, severity: (severity !== 'Info' && HOUSEKEEPING_CODES.has(code)) ? 'Housekeeping' : severity, code, detail, ...extra });
 
   for (const x of Object.values(by)) {
     const approved = x.orders.filter(d => d.status === 'approved'), pending = x.orders.filter(d => d.status === 'pending');
@@ -453,12 +458,16 @@ export function buildModel(data, start, end) {
       // Compare cumulative cost, not individual draws, and require a shared source ID.
       const directBudgetMatch = committed <= TOL && (approvedCostByKey[k] || 0) > TOL && actual <= approvedCostByKey[k] + TOL;
       const trusted = ratifiedKeys.has(k) || (billedMeta[k] || []).some(m => m.informal) || actualNotedKeys.has(k) || directBudgetMatch;
+      if (actual <= TOL) {
+        if(actual < -TOL)push(x.job,'Info','VENDOR_COST_CREDIT',`${k}: vendor cost credit ${money(actual)} retained in actual costs.`);
+        continue;
+      }
       if (actual > committed + TOL) {
         if (directBudgetMatch) push(x.job, 'Info', 'DIRECT_BILL_WITHIN_APPROVED_BUDGET', `${k}: incurred ${money(actual)} against approved scope cost budget ${money(approvedCostByKey[k])}; no vendor work order was issued.`);
         else if (trusted) push(x.job, 'Info', 'INFORMAL_VENDOR_SCOPE', `${k}: incurred ${money(actual)} without a matching formal work-order line, but is approved per the thread, payment trail, or the line item's own note.`);
-        else push(x.job, 'Review', 'COST_OVER_COMMITMENT', `${k}: incurred ${money(actual)} vs work-order commitment ${money(committed)}.`);
+        else if(committed>TOL||(approvedCostByKey[k]||0)>TOL) push(x.job, 'Review', 'COST_OVER_COMMITMENT', `${k}: incurred ${money(actual)} vs work-order commitment ${money(committed)}.`);
       }
-      if (committed <= TOL && !trusted) push(x.job, 'Review', 'UNCOMMITTED_COST', `${k}: incurred ${money(actual)} without a matching valid vendor work order.`);
+      if (committed <= TOL && !trusted && !(approvedCostByKey[k]>TOL)) push(x.job, 'Review', 'UNCOMMITTED_COST', `${k}: incurred ${money(actual)} without a matching valid vendor work order.`);
     }
     if (approvedChanges.some(d => Number(d.priceWithTax || 0) < -TOL)) push(x.job, 'Info', 'NEGATIVE_CHANGE_ORDER', 'Approved negative change order/credit reduces contract value and is retained in the audit trail.');
 
@@ -513,10 +522,10 @@ export function buildModel(data, start, end) {
 
   const fingerprint = new Map();
   for (const d of [...invoices, ...vendorBills]) {
-    const key = [d.type, d.job?.id || '', d.account?.id || '', localDate(d.issueDate || d.createdAt) || '', Number(documentTotal(d) || 0).toFixed(2)].join('|');
+    const key = [d.type, d.job?.id || '', d.account?.id || '', localDate(d.issueDate || d.createdAt) || '', Number(documentTotal(d) || 0).toFixed(2), (d.costItems?.nodes||[]).every(i=>strongScopeKey(i))?(d.costItems?.nodes||[]).map(i=>`${strongScopeKey(i)}:${d.type.startsWith('customer')?lineRevenue(i):lineCost(i)}`).sort().join(';'):'unresolved-scopes'].join('|');
     const arr = fingerprint.get(key) || []; arr.push(d); fingerprint.set(key, arr);
   }
-  for (const arr of fingerprint.values()) if (arr.length > 1) push(arr[0].job, 'Critical', 'POSSIBLE_DUPLICATE_FINANCIAL', `${arr.length} valid financial documents share type/job/account/date/amount: ${arr.map(d => d.fullName).join(', ')}.`);
+  for (const arr of fingerprint.values()) if (arr.length > 1) push(arr[0].job, 'Review', 'POSSIBLE_DUPLICATE_FINANCIAL', `${arr.length} valid financial documents share type/job/account/date/amount and scope signature; compare the originals before deciding they are duplicates: ${arr.map(d => d.fullName).join(', ')}.`);
 
   const wins = jobs.filter(j => j.baseApproval && inRange(eventDate(j.baseApproval), start, end));
   const losses = jobs.filter(j => j.trueLoss && inRange(eventDate(j.latestBase), start, end));
