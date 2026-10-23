@@ -4,10 +4,11 @@ import {money} from './forensicModel.js';
 import {Table,Metric} from './dashboardPresentation.jsx';
 
 const stamp=value=>value?new Date(/^\d{4}-\d{2}-\d{2}$/.test(value)?`${value}T12:00:00-06:00`:value).toLocaleString('en-US',{timeZone:'America/Chicago',month:'short',day:'numeric',year:'numeric',...(!/^\d{4}-\d{2}-\d{2}$/.test(value)?{hour:'numeric',minute:'2-digit'}:{})}):'No date';
-export default function ActionCenter({model,available}){
+export default function ActionCenter({model,available,requestedJobId=''}){
  const queue=useMemo(()=>buildActionQueue(model),[model]);
- const [filter,setFilter]=useState('Money first'),[search,setSearch]=useState(''),[selectedId,setSelectedId]=useState('');
+ const [filter,setFilter]=useState('Money first'),[search,setSearch]=useState(''),[selectedId,setSelectedId]=useState(requestedJobId);
  const evidenceRef=useRef(null);
+ useEffect(()=>{setSelectedId(requestedJobId);},[requestedJobId]);
  useEffect(()=>{if(selectedId)evidenceRef.current?.focus();},[selectedId]);
  const selected=model.jobs.find(j=>j.job.id===selectedId);
  const visible=queue.filter(g=>(filter!=='Money first'||g.priority<=2)&&(filter!=='Critical'||g.critical)&&`${g.name} ${g.issues.map(e=>e.label).join(' ')}`.toLowerCase().includes(search.toLowerCase()));

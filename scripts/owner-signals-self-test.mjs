@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {ownerSignals} from '../src/ownerSignals.js';
+const doc=(id,date,balance)=>({id,issueDate:date,balance});
+const model={arDocs:[doc('a','2026-10-22',100.01),doc('b','2026-10-08',20.02),doc('c','2026-10-07',30.03),doc('d','2026-09-22',40.04),doc('e','2026-09-21',50.05),doc('f',null,60.06),doc('g','invalid',70.07)],current:[{approved:100,projectedProfit:-1},{approved:100,projectedProfit:0},{approved:0,projectedProfit:-2},{approved:100,projectedProfit:1}],jobs:[{job:{closedOn:'2026-10-01'},approved:100,billed:200,cost:150},{job:{closedOn:null},approved:100,billed:1000,cost:1}],closedProfit:50};
+const original=JSON.stringify(model),s=ownerSignals(model,'2026-10-22');
+assert.deepEqual(s.aging.map(x=>x.amount),[120.03,70.07,50.05,130.13]);
+assert.equal(Math.round(s.aging.reduce((n,b)=>n+b.amount,0)*100),37028);
+assert.equal(s.collectFirst[0].id,'e');assert.equal(s.marginRisk.length,2);assert.equal(s.closedMargin,25);
+assert.equal(JSON.stringify(model),original);
+assert.equal(ownerSignals({...model,jobs:[]},'2026-10-22').closedMargin,null);
+console.log('Owner signals: invoice-age boundaries, unknown dates, cent conservation, collection ordering, margin scope, zero-revenue guard and immutability passed.');

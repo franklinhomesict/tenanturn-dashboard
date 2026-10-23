@@ -1,0 +1,43 @@
+import {useMemo,useState} from 'react';
+import {money,ymd} from './forensicModel.js';
+import {ownerSignals} from './ownerSignals.js';
+
+const stages=['Backlog','Assigned / Not Started','WIP','Ready to Bill','On Hold','Review','Complete / Billed'];
+const stageLabel={'Assigned / Not Started':'Assigned','Complete / Billed':'Billed'};
+const icons={Sales:'↗',Ops:'▤',People:'◉',Finance:'＄',Overview:'◈',Actions:'⚑'};
+export {icons};
+
+export default function OwnerOverview({model:m,available,onNavigate,onInspect,line}){
+ const [stage,setStage]=useState('All'),[search,setSearch]=useState(''),[sort,setSort]=useState('priority');
+ const s=useMemo(()=>ownerSignals(m,ymd(new Date())),[m]);
+ const value=n=>available?money(n):'—';
+ const jobs=m.current.filter(j=>(stage==='All'||j.stage===stage)&&`${j.job.name} ${j.src.billingCustomer} ${j.src.pm}`.toLowerCase().includes(search.toLowerCase())).slice().sort((a,b)=>sort==='profit'?b.projectedProfit-a.projectedProfit:sort==='address'?a.job.name.localeCompare(b.job.name):b.reviews-a.reviews||a.projectedProfit-b.projectedProfit);
+ const kpis=[
+  ['Customer payments applied',m.customerPaymentsApplied,'Selected period · company-wide','Finance','lime'],
+  ['Approved production sales',m.sales,'Selected period · '+line,'Sales',''],
+  ['Issued production billing',m.billed,'Selected period · '+line,'Finance',''],
+  ['Closed recorded job profit',m.closedProfit,'Lifetime · excludes overhead','Finance',''],
+  ['Customer receivable',m.ar,'Current · company-wide','Finance',''],
+  ['Vendor bills payable',m.ap,'Current · company-wide','Finance',''],
+  ['Future production cost',m.futureCost,'Current open jobs · estimate','People',''],
+  ['Open projected job profit',m.projectedProfit,'Current open jobs · provisional','Finance',''],
+ ];
+ function exportSummary(){
+  if(!available)return;
+  const rows=[['KPI','Amount','Basis'],...kpis.map(([label,n,basis])=>[label,n.toFixed(2),basis])];
+  const csv=rows.map(r=>r.map(v=>'"'+String(v).replaceAll('"','""')+'"').join(',')).join('\r\n');
+  const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));const a=document.createElement('a');a.href=url;a.download=`tenanturn-kpis-${ymd(new Date())}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ }
+ return <div className='overview'>
+  <div className='overview-title'><div><div className='eyebrow'>THE OWNER'S VIEW</div><h2>Keep the money moving.</h2><p>Cash, profit, and the work between them.</p></div><button className='quiet-button' disabled={!available} onClick={exportSummary}>↓ Export KPIs</button></div>
+  <div className='executive-kpis'>{kpis.map(([label,n,note,target,tone],i)=><button key={label} className={`executive-kpi ${tone}`} onClick={()=>onNavigate(target)}><div className='kpi-top'><span>{label}</span><span aria-hidden='true'>↗</span></div><strong>{value(n)}</strong><div className='kpi-bottom'><span>{note}</span><span className='kpi-index'>0{i+1}</span></div></button>)}</div>
+  <div className='overview-pair'>
+   <section className='owner-panel'><div className='panel-heading'><div><div className='eyebrow'>COLLECTIONS</div><h3>Bring cash home</h3></div><button className='text-button' onClick={()=>onNavigate('Finance')}>View ledger ↗</button></div><div className='collection-total'>{value(m.ar)}<span>open customer invoices · company-wide</span></div><div className='aging-bar' aria-label='Receivables by invoice issue age'>{s.aging.map((b,i)=><div key={b.label} className={`age-${i}`} style={{flex:available&&m.ar>0?b.amount/m.ar:1}} title={`${b.label}: ${value(b.amount)}`}/>)}</div><div className='aging-legend'>{s.aging.map((b,i)=><div key={b.label}><span><i className={`age-${i}`}/>{b.label}</span><b>{value(b.amount)}</b></div>)}</div><p className='panel-note'>Age since invoice issue, not days overdue. Undated invoices are kept separate. Includes reimbursement balances.</p><div className='collection-list'>{available?s.collectFirst.slice(0,3).map(d=><button key={d.id} onClick={()=>onInspect(d.job?.id)} disabled={!d.job?.id}><div><b>{d.job?.name||d.account?.name||'Unassigned invoice'}</b><span>{d.fullName} · {d.issueAge==null?'No issue date':`${d.issueAge} days since issue`}</span></div><strong>{money(d.balance)} ↗</strong></button>):<div className='empty-state'>Collections appear after a fresh source passes the financial checks.</div>}{available&&!s.collectFirst.length&&<div className='empty-state'>No outstanding customer invoices.</div>}</div></section>
+   <section className='owner-panel pipeline-panel'><div className='panel-heading'><div><div className='eyebrow'>EXECUTION</div><h3>Where work stands</h3></div><span className='count-chip'>{available?m.current.length:'—'} open jobs</span></div><p className='panel-note'>Current workload · independent of the sales period</p><div className='pipeline-stages'>{stages.map((name,i)=>{const count=m.current.filter(j=>j.stage===name).length;return <button key={name} aria-pressed={stage===name} onClick={()=>setStage(stage===name?'All':name)} className={stage===name?'selected':''}><span className='stage-number'>0{i+1}</span><div><span>{stageLabel[name]||name}</span><div className='stage-track'><i style={{width:available?`${count/Math.max(1,m.current.length)*100}%`:'0%'}}/></div></div><b>{available?count:'—'}</b></button>})}</div><div className='pipeline-footer'><span>Other / unclassified</span><b>{available?m.current.filter(j=>!stages.includes(j.stage)).length:'—'}</b></div></section>
+  </div>
+  <div className='owner-insights'><button onClick={()=>onNavigate('Actions')}><span className='insight-dot amber'/><div><b>{available?s.marginRisk.length:'—'} open jobs with zero or negative projected profit</b><span>Review scope, price, and cost before committing more.</span></div><span>↗</span></button><button onClick={()=>onNavigate('Finance')}><span className='insight-dot lime-dot'/><div><b>{available&&s.closedMargin!=null?`${s.closedMargin.toFixed(1)}%`:'—'} closed recorded job margin</b><span>Lifetime, revenue weighted · {available?m.checkedJobs:'—'} / {available?m.closedJobs:'—'} jobs checked.</span></div><span>↗</span></button><div className='draw-insight'><span className='insight-dot gray'/><div><b>Owner draw · unavailable</b><span>Bank balance, overhead, and reserves are not verified.</span></div></div></div>
+  <section className='owner-panel jobs-panel'><div className='panel-heading'><div><div className='eyebrow'>JOB ECONOMICS</div><h3>Every job. Every dollar.</h3></div><span className='count-chip'>{available?jobs.length:'—'} jobs</span></div><div className='jobs-controls'><label className='searchbox'><span className='sr-only'>Search open jobs</span><input type='search' placeholder='Search address, customer, or PM…' value={search} onChange={e=>setSearch(e.target.value)}/></label><label><span className='sr-only'>Job stage</span><select value={stage} onChange={e=>setStage(e.target.value)}><option>All</option>{stages.map(x=><option key={x}>{x}</option>)}</select></label><label><span className='sr-only'>Sort jobs</span><select value={sort} onChange={e=>setSort(e.target.value)}><option value='priority'>Review priority</option><option value='profit'>Projected profit</option><option value='address'>Address</option></select></label></div>
+   {available?<><div className='table-scroll'><table><thead><tr>{['Property / customer','Stage','Approved','Future cost','Projected profit','Reviews','Detail'].map(x=><th key={x}>{x}</th>)}</tr></thead><tbody>{jobs.slice(0,25).map(j=><tr key={j.job.id}><td data-label='Property / customer'><b>{j.job.name}</b><span className='table-secondary'>{j.src.billingCustomer}</span></td><td data-label='Stage'><span className={`stage-pill ${j.stage==='Ready to Bill'?'ready':''}`}>{j.stage}</span></td><td data-label='Approved'>{money(j.approved)}</td><td data-label='Future cost'>{money(j.remainingBudget)}</td><td data-label='Projected profit' className={j.projectedProfit<0?'bad':'good'}><b>{money(j.projectedProfit)}</b></td><td data-label='Reviews'>{j.reviews||'—'}</td><td data-label='Detail'><button className='text-button' aria-label={`Inspect ${j.job.name}`} onClick={()=>onInspect(j.job.id)}>Inspect ↗</button></td></tr>)}</tbody></table></div>{!jobs.length&&<p className='empty-state'>No jobs match these filters.</p>}<p className='panel-note'>Showing {Math.min(jobs.length,25)} of {jobs.length} matches. Projected profit is approved production less supported projected costs. Actual job profit and source documents are in Finance.</p></>:<p className='empty-state'>Job economics are withheld until the source is current and financial checks pass. Open Actions to inspect the source issues.</p>}
+  </section>
+ </div>;
+}

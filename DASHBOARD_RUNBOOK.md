@@ -32,6 +32,16 @@ This section supersedes the older static-refresh instructions below.
 - The job inspector shows loaded documents, scope lines, job messages and daily-log text. It does not claim to inspect file contents, photos or external Drive folders.
 - `scripts/action-queue-self-test.mjs` is part of the build checks. Do not commit source fixtures or private customer records.
 
+## Owner command center — October 22, 2026
+
+- Default Overview uses `OwnerOverview.jsx` with the existing audited ledger. Eight KPI cards route to the underlying sales, finance and vendor sections. No JobTread writes or accounting-recognition changes.
+- Collections age by invoice issue date, never assumed due date. Unknown dates stay in a separate bucket. All A/R and payments remain explicitly company-wide in MR/CS views.
+- `ownerSignals.js` derives aging, collection priority, revenue-weighted lifetime closed margin, and approved open jobs with nonpositive projected profit. Regression checks run in the normal build.
+- Pipeline buttons filter open job economics; address/customer/PM search and sort use the selected line. Inspect routes into the existing company-wide source inspector.
+- Source errors, stale data, invalid ranges, and critical financial checks still suppress every overview financial value and disable CSV export. The first critical discrepancy is visible above the overview.
+- CSV exports the eight displayed KPI values and their scope/basis. Bank balance, overhead and owner draw remain unavailable.
+- Navigation and filters are browser-session state. No action is cleared, approved, sent, or retried by this UI.
+
 ## Purpose
 This file is the handoff for future ChatGPT sessions. Read this **before refreshing or changing dashboard data** so the operating logic does not have to be reconstructed.
 
